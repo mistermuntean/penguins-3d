@@ -5,6 +5,22 @@ import { createNoise2D } from 'simplex-noise';
 
 // Final Polished Prototype
 
+// ======== HUD & GAME STATE ========
+const hudDiv = document.createElement('div');
+hudDiv.id = 'stats-hud';
+hudDiv.style.position = 'absolute';
+hudDiv.style.top = '10px';
+hudDiv.style.right = '10px';
+hudDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+hudDiv.style.color = 'white';
+hudDiv.style.padding = '10px';
+hudDiv.style.fontFamily = 'monospace';
+hudDiv.style.borderRadius = '5px';
+document.body.appendChild(hudDiv);
+
+let hunger = 100;
+let isDead = false;
+
 // ======== SCENE SETUP ========
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
@@ -15,6 +31,18 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
+
+// ======== UI ========
+const statsDiv = document.createElement('div');
+statsDiv.id = 'stats';
+statsDiv.style.position = 'absolute';
+statsDiv.style.top = '10px';
+statsDiv.style.left = '10px';
+statsDiv.style.color = 'white';
+statsDiv.style.fontFamily = 'Arial, sans-serif';
+statsDiv.style.fontSize = '20px';
+statsDiv.innerHTML = 'Energy: 100%';
+document.body.appendChild(statsDiv);
 
 // ======== CONTROLS ========
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -31,7 +59,7 @@ directionalLight.castShadow = true;
 scene.add(directionalLight);
 
 // ======== PHYSICS WORLD & MATERIALS ========
-const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -25, 0) });
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -80, 0) });
 world.broadphase = new CANNON.SAPBroadphase(world);
 (world.solver as CANNON.GSSolver).iterations = 10;
 
@@ -47,62 +75,215 @@ world.addContactMaterial(groundPenguinSlidingContact);
 
 // ======== PROCEDURAL TERRAIN ========
 const noise2D = createNoise2D();
-const terrainSize = 128;
-const terrainMaxHeight = 12;
-const visResolution = 128; 
+const terrainSize = 64; // Reduced from 128
+const terrainMaxHeight = 20; 
+const visResolution = 64; // Match terrain size
 
 function getHeight(x: number, z: number): number {
-    const xVal = x / terrainSize * 2.5;
-    const zVal = z / terrainSize * 2.5;
-    let noise = noise2D(xVal, zVal) * 0.7 + noise2D(xVal * 2, zVal * 2) * 0.3;
-    return (noise * 0.5 + 0.5) * terrainMaxHeight;
+    // Scaled for smaller world (divisors halved)
+    const baseNoise = noise2D(x / 40, z / 40) * 12; 
+    
+    // Transition parameter (sigmoid-like) based on X
+    // x < 0 is land, x > 0 is sea generally
+    const t = 1 / (1 + Math.exp(x / 5)); // Sharper transition
+    
+    // Modulate the transition steepness with Z
+    // fast transition = cliff, slow transition = slope
+    const coastVar = noise2D(z / 20, 100) * 0.5 + 0.5; 
+    
+    let height = 0;
+    
+    if (x < -5) {
+        // High Ground (Snowy)
+        height = 10 + baseNoise + noise2D(x / 10, z / 10) * 1.5; 
+    } else if (x > 5) {
+        // Deep Sea
+        return -15 + baseNoise * 0.5;
+    } else {
+        // Transition Zone (-5 to 5)
+        const landH = 10 + baseNoise;
+        const seaH = -15 + baseNoise * 0.5;
+        const u = (x + 5) / 10;
+        
+        let blend = u;
+        
+        // Mega Ramp in the center (Z between -10 and 10)
+        if (Math.abs(z) < 10) {
+            // Smooth Ramp
+            blend = u; 
+        } else if (coastVar < 0.3) {
+             // Cliff: Sharp step
+             blend = u < 0.5 ? 0 : 1; 
+             blend = 1 / (1 + Math.exp(-(x) * 2)); 
+        } else {
+             // Gradual Slope elsewhere
+             blend = u;
+        }
+        
+        height = landH * (1 - blend) + seaH * blend;
+        
+        // Less noise on the ramp for smooth sliding
+        if (Math.abs(z) < 10) {
+             height += noise2D(x, z) * 0.2; 
+        } else {
+             height += noise2D(x, z) * 1.0;
+        }
+    }
+    
+    return height;
 }
 
+// 1. Top Surface (Detailed)
 const terrainGeometry = new THREE.PlaneGeometry(terrainSize, terrainSize, visResolution - 1, visResolution - 1);
 const vertices = terrainGeometry.attributes.position.array as unknown as number[];
 for (let i = 0, j = 0; i < vertices.length / 3; i++, j += 3) {
-    vertices[j + 2] = getHeight(vertices[j], vertices[j + 1]);
+    const worldX = vertices[j];
+    const worldZ = -vertices[j + 1]; // Local Y is World -Z (due to -90 X rot later)
+    vertices[j + 2] = getHeight(worldX, -worldZ); 
 }
 terrainGeometry.computeVertexNormals();
-const terrainMesh = new THREE.Mesh(terrainGeometry, new THREE.MeshStandardMaterial({ color: 0xcccccc, side: THREE.DoubleSide }));
-terrainMesh.rotation.x = -Math.PI / 2;
-terrainMesh.receiveShadow = true;
-scene.add(terrainMesh);
+
+const terrainGroup = new THREE.Group();
+scene.add(terrainGroup);
+
+const topMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: 0.9 });
+const topMesh = new THREE.Mesh(terrainGeometry, topMaterial);
+topMesh.rotation.x = -Math.PI / 2;
+topMesh.receiveShadow = true;
+terrainGroup.add(topMesh);
+
+// 2. Dynamic Terrain Skirt (Seamless)
+const skirtGeometry = new THREE.BufferGeometry();
+const skirtVertices: number[] = [];
+const skirtIndices: number[] = [];
+const skirtDepth = -50;
+
+// Access the generated vertices from the PlaneGeometry
+const planeVerts = terrainGeometry.attributes.position.array;
+const widthSegs = visResolution - 1;
+const heightSegs = visResolution - 1;
+const stride = 3;
+const rowStride = (widthSegs + 1) * stride;
+
+let vertIdx = 0;
+
+// Helper to push a quad
+function pushQuad(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) {
+    // P1 (Top Left)
+    skirtVertices.push(x1, y1, z1);
+    // P2 (Bottom Left)
+    skirtVertices.push(x1, y1, skirtDepth);
+    // P3 (Top Right)
+    skirtVertices.push(x2, y2, z2);
+    // P4 (Bottom Right)
+    skirtVertices.push(x2, y2, skirtDepth);
+
+    skirtIndices.push(vertIdx, vertIdx + 1, vertIdx + 2);
+    skirtIndices.push(vertIdx + 2, vertIdx + 1, vertIdx + 3);
+    vertIdx += 4;
+}
+
+// Side 1: Top Edge (Local +Y, World -Z) - Row (heightSegs)
+// Iterate X from 0 to widthSegs
+const topRowOffset = heightSegs * rowStride;
+for (let i = 0; i < widthSegs; i++) {
+    const idx1 = topRowOffset + i * stride;
+    const idx2 = topRowOffset + (i + 1) * stride;
+    pushQuad(planeVerts[idx2], planeVerts[idx2+1], planeVerts[idx2+2], 
+             planeVerts[idx1], planeVerts[idx1+1], planeVerts[idx1+2]);
+}
+
+// Side 2: Right Edge (Local +X, World +X) - Column (widthSegs)
+// Iterate Y from heightSegs down to 0
+for (let i = heightSegs; i > 0; i--) {
+    const idx1 = i * rowStride + widthSegs * stride;
+    const idx2 = (i - 1) * rowStride + widthSegs * stride;
+    pushQuad(planeVerts[idx2], planeVerts[idx2+1], planeVerts[idx2+2], 
+             planeVerts[idx1], planeVerts[idx1+1], planeVerts[idx1+2]);
+}
+
+// Side 3: Bottom Edge (Local -Y, World +Z) - Row 0
+// Iterate X from widthSegs down to 0
+for (let i = widthSegs; i > 0; i--) {
+    const idx1 = i * stride;
+    const idx2 = (i - 1) * stride;
+    pushQuad(planeVerts[idx2], planeVerts[idx2+1], planeVerts[idx2+2], 
+             planeVerts[idx1], planeVerts[idx1+1], planeVerts[idx1+2]);
+}
+
+// Side 4: Left Edge (Local -X, World -X) - Column 0
+// Iterate Y from 0 to heightSegs
+for (let i = 0; i < heightSegs; i++) {
+    const idx1 = i * rowStride;
+    const idx2 = (i + 1) * rowStride;
+    pushQuad(planeVerts[idx2], planeVerts[idx2+1], planeVerts[idx2+2], 
+             planeVerts[idx1], planeVerts[idx1+1], planeVerts[idx1+2]);
+}
+
+skirtGeometry.setAttribute('position', new THREE.Float32BufferAttribute(skirtVertices, 3));
+skirtGeometry.setIndex(skirtIndices);
+skirtGeometry.computeVertexNormals();
+
+const skirtMaterial = new THREE.MeshLambertMaterial({ color: 0x505060, side: THREE.DoubleSide });
+const skirtMesh = new THREE.Mesh(skirtGeometry, skirtMaterial);
+topMesh.add(skirtMesh); 
+
+// 3. Bottom Cap
+const bottomGeom = new THREE.PlaneGeometry(terrainSize, terrainSize);
+const bottomMesh = new THREE.Mesh(bottomGeom, skirtMaterial);
+bottomMesh.position.z = skirtDepth; 
+topMesh.add(bottomMesh); 
+
 
 const trimeshShape = new CANNON.Trimesh(Array.from(vertices), Array.from(terrainGeometry.index!.array));
 const terrainBody = new CANNON.Body({ mass: 0, material: groundMaterial, shape: trimeshShape });
+// Add a thick base box to prevent tunneling through the mesh
+const baseShape = new CANNON.Box(new CANNON.Vec3(terrainSize/2, 2, terrainSize/2));
+terrainBody.addShape(baseShape, new CANNON.Vec3(0, -17, 0)); // Solid floor at bottom
 terrainBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 world.addBody(terrainBody);
 
 // ======== CATCH PLANE ========
-const catchPlaneGeometry = new THREE.PlaneGeometry(terrainSize * 2, terrainSize * 2);
-const catchPlaneMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, side: THREE.DoubleSide });
-const catchPlaneMesh = new THREE.Mesh(catchPlaneGeometry, catchPlaneMaterial);
-catchPlaneMesh.rotation.x = -Math.PI / 2;
-catchPlaneMesh.position.y = -20; // Well below everything
-catchPlaneMesh.receiveShadow = true;
-scene.add(catchPlaneMesh);
 
-const catchPlaneShape = new CANNON.Plane();
-const catchPlaneBody = new CANNON.Body({ mass: 0, material: groundMaterial });
-catchPlaneBody.addShape(catchPlaneShape);
-catchPlaneBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
-catchPlaneBody.position.set(0, -20, 0);
-world.addBody(catchPlaneBody);
+const catchPlaneGeometry = new THREE.PlaneGeometry(terrainSize * 2, terrainSize * 2);
 
 // ======== WATER ========
-const waterLevel = 4;
-const waterGeometry = new THREE.PlaneGeometry(terrainSize, terrainSize);
-const waterMaterial = new THREE.MeshStandardMaterial({
-    color: 0x006994,
+const waterLevel = 0;
+const waterDepth = 20;
+const waterGeometry = new THREE.BoxGeometry(terrainSize - 0.2, waterDepth, terrainSize - 0.2, 64, 1, 64);
+
+const sideMat = new THREE.MeshPhysicalMaterial({
+    color: 0x88ccff, // Brighter
     transparent: true,
-    opacity: 0.7,
-    metalness: 0.2,
-    roughness: 0.3
+    transmission: 1.0, // Fully transmissive
+    opacity: 1,
+    metalness: 0.0,
+    roughness: 0.0, // No blur
+    ior: 1.33,
+    thickness: 0.5, // Less absorption
+    side: THREE.FrontSide
 });
-const waterMesh = new THREE.Mesh(waterGeometry, waterMaterial);
-waterMesh.rotation.x = -Math.PI / 2;
-waterMesh.position.y = waterLevel;
+
+const topMat = new THREE.MeshStandardMaterial({
+    color: 0x44aaff,
+    transparent: true,
+    opacity: 0.6,
+    metalness: 0.1,
+    roughness: 0.0, // Shiny top
+    side: THREE.DoubleSide
+});
+
+const waterMaterials = [
+    sideMat, // Right
+    sideMat, // Left
+    topMat,  // Top
+    topMat,  // Bottom
+    sideMat, // Front
+    sideMat  // Back
+];
+
+const waterMesh = new THREE.Mesh(waterGeometry, waterMaterials);
+waterMesh.position.y = waterLevel - waterDepth / 2;
 scene.add(waterMesh);
 
 // ======== PENGUIN ========
@@ -112,7 +293,7 @@ const penguinHeight = 1.0;
 // Using a single Sphere for the smoothest possible movement
 const penguinBody = new CANNON.Body({
     mass: 6,
-    position: new CANNON.Vec3(0, terrainMaxHeight + 5, 0),
+    position: new CANNON.Vec3(-40, 20, 0), // Safe spawn on plateau
     linearDamping: 0.1,
     angularDamping: 0.5,
     material: penguinMaterial,
@@ -239,6 +420,74 @@ const splashParticles = new THREE.Points(splashParticleGeometry, splashParticleM
 splashParticles.frustumCulled = false;
 scene.add(splashParticles);
 
+// ======== MARINE SNOW ========
+const marineSnowCount = 3000;
+const marineSnowGeom = new THREE.BufferGeometry();
+const marineSnowPos = new Float32Array(marineSnowCount * 3);
+const marineSnowColors = new Float32Array(marineSnowCount * 3);
+const marineSnowDepths = new Float32Array(marineSnowCount); // Depth below surface
+
+const colorPalette = [
+    new THREE.Color(0xffffff), // White
+    new THREE.Color(0xaaccff), // Light Blue
+    new THREE.Color(0x00ffff), // Cyan
+    new THREE.Color(0x88ffaa)  // Seafoam
+];
+
+for(let i=0; i<marineSnowCount; i++) {
+    const x = (Math.random() - 0.5) * terrainSize;
+    const z = (Math.random() - 0.5) * terrainSize;
+    const depth = Math.random() * waterDepth;
+    
+    marineSnowPos[i*3] = x;
+    marineSnowPos[i*3+1] = waterLevel - depth;
+    marineSnowPos[i*3+2] = z;
+    
+    marineSnowDepths[i] = depth;
+    
+    const col = colorPalette[Math.floor(Math.random() * colorPalette.length)];
+    marineSnowColors[i*3] = col.r;
+    marineSnowColors[i*3+1] = col.g;
+    marineSnowColors[i*3+2] = col.b;
+}
+marineSnowGeom.setAttribute('position', new THREE.BufferAttribute(marineSnowPos, 3));
+marineSnowGeom.setAttribute('color', new THREE.BufferAttribute(marineSnowColors, 3));
+
+const marineSnowMat = new THREE.PointsMaterial({
+    vertexColors: true,
+    size: 0.2,
+    transparent: true,
+    opacity: 0.8,
+    blending: THREE.AdditiveBlending
+});
+const marineSnowSystem = new THREE.Points(marineSnowGeom, marineSnowMat);
+marineSnowSystem.frustumCulled = false;
+scene.add(marineSnowSystem);
+
+function updateMarineSnow() {
+    const pos = marineSnowSystem.geometry.attributes.position.array as Float32Array;
+    const time = clock.getElapsedTime(); // Use global clock
+    
+    for(let i=0; i<marineSnowCount; i++) {
+        const x = pos[i*3];
+        const z = pos[i*3+2];
+        const depth = marineSnowDepths[i];
+        
+        // Calculate Surface Height (Same as Water)
+        let surfaceY = waterLevel; // Base level (0)
+        // Note: Water Mesh is at y = waterLevel - waterDepth/2 = -10. 
+        // Top vertex local y is +10. So world Y is 0.
+        // We replicate the wave function:
+        surfaceY += Math.sin(x * 0.05 + time * 0.5) * 0.8;
+        surfaceY += Math.cos(z * 0.07 + time * 0.4) * 0.6;
+        surfaceY += Math.sin((x + z) * 0.2 + time * 1.2) * 0.3;
+        surfaceY += Math.cos((x - z) * 0.5 + time * 2.0) * 0.1;
+        
+        // Bob with wave
+        pos[i*3+1] = surfaceY - depth;
+    }
+    marineSnowSystem.geometry.attributes.position.needsUpdate = true;
+}
 
 // ======== SQUID ========
 // ======== SQUID ========
@@ -246,38 +495,57 @@ class Squid {
     position: THREE.Vector3;
     velocity: THREE.Vector3;
     visuals: THREE.Group;
+    type: number;
 
-    constructor(spawnPos: THREE.Vector3) {
+    constructor(spawnPos: THREE.Vector3, type: number = 0) {
         this.position = spawnPos.clone();
         this.velocity = new THREE.Vector3(0, 0, 0);
+        this.type = type;
 
         this.visuals = new THREE.Group();
         
-        // Body: Flattened ovoid
-        const bodyGeom = new THREE.SphereGeometry(0.2, 16, 16);
-        bodyGeom.scale(1, 0.6, 0.4); // Flatten
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffa500, roughness: 0.2, metalness: 0.5 });
+        let bodyGeom = new THREE.SphereGeometry(0.2, 16, 16);
+        let color = 0xffa500;
+        
+        // Define scales (x, y, z) - assume Z is length (forward/back)
+        let scale = new THREE.Vector3(0.6, 0.4, 1.0);
+
+        if (type === 1) { // Blue (Sleek)
+            scale.set(0.6, 0.6, 1.5);
+            color = 0x0000ff;
+        } else if (type === 2) { // Red (Small Round)
+            scale.set(0.7, 0.7, 0.7);
+            color = 0xff0000;
+        } else if (type === 3) { // Green (Flat)
+            scale.set(1.2, 0.3, 1.2);
+            color = 0x00ff00;
+        } else { // Squid (Orange)
+            scale.set(0.6, 0.4, 1.0);
+        }
+
+        bodyGeom.scale(scale.x, scale.y, scale.z);
+        const bodyMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.5 });
         const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
         this.visuals.add(bodyMesh);
 
-        // Eyes: Black spheres (Scaled down and positioned closer)
-        const eyeGeom = new THREE.SphereGeometry(0.02, 8, 8); // Smaller
+        // Eyes: Black spheres (Front is -Z)
+        const eyeGeom = new THREE.SphereGeometry(0.02, 8, 8); 
         const eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
         const leftEye = new THREE.Mesh(eyeGeom, eyeMat);
-        leftEye.position.set(0.15, 0.05, 0.08); // Touching head
+        leftEye.position.set(0.08, 0.05, -0.15 * scale.z); // Front (-Z)
         this.visuals.add(leftEye);
         const rightEye = new THREE.Mesh(eyeGeom, eyeMat);
-        rightEye.position.set(0.15, 0.05, -0.08); // Touching head
+        rightEye.position.set(-0.08, 0.05, -0.15 * scale.z); // Front (-Z)
         this.visuals.add(rightEye);
 
-        // Tail: Half moon / Banana shape (Larger and better positioned)
-        const tailGeom = new THREE.ConeGeometry(0.15, 0.4, 8); // Larger
-        tailGeom.rotateZ(Math.PI / 2);
+        // Tail: Cone pointing back (+Z)
+        const tailGeom = new THREE.ConeGeometry(0.15, 0.4, 8); 
+        tailGeom.rotateX(Math.PI / 2); // Cone points Y -> Rotate X 90 -> Points +Z
         const tailMesh = new THREE.Mesh(tailGeom, bodyMat);
-        tailMesh.position.set(-0.3, 0, 0); // Further back
+        tailMesh.position.set(0, 0, 0.25 * scale.z); // Back (+Z)
         this.visuals.add(tailMesh);
 
-        this.visuals.frustumCulled = false; // Ensure visibility
+        this.visuals.frustumCulled = false; 
         scene.add(this.visuals);
     }
 
@@ -301,6 +569,7 @@ class Squid {
 
         for (const other of allSquids) {
             if (other === this) continue;
+            if (other.type !== this.type) continue; // Only swarm with same species
             const d = this.position.distanceTo(other.position);
             
             if (d < neighborDist) {
@@ -373,6 +642,17 @@ class Squid {
         } else {
              this.position.add(this.velocity);
         }
+        
+        // World Boundary Check (Cube Walls)
+        const halfSize = terrainSize / 2 - 1.0;
+        if (Math.abs(this.position.x) > halfSize) {
+            this.position.x = Math.sign(this.position.x) * halfSize;
+            this.velocity.x *= -1; // Bounce
+        }
+        if (Math.abs(this.position.z) > halfSize) {
+            this.position.z = Math.sign(this.position.z) * halfSize;
+            this.velocity.z *= -1; // Bounce
+        }
 
         // Update visuals
         this.visuals.position.copy(this.position);
@@ -392,27 +672,7 @@ class Squid {
 }
 
 const squids: Squid[] = [];
-const maxSquids = 30;
-let attempts = 0;
-
-// Spawn in lakes (low points)
-while (squids.length < maxSquids && attempts < 2000) { 
-    attempts++;
-    const x = (Math.random() - 0.5) * terrainSize * 0.9;
-    const z = (Math.random() - 0.5) * terrainSize * 0.9;
-    const terrainY = getHeight(x, -z); // Fix Z coordinate
-    
-    // Only spawn if there is enough water depth
-    // Must be at least 1.5 units deep to be worth it
-    if (waterLevel > terrainY + 1.5) {
-        // Spawn randomly within the volume
-        const minY = terrainY + 0.8;
-        const maxY = waterLevel - 0.5;
-        const y = minY + Math.random() * (maxY - minY);
-        squids.push(new Squid(new THREE.Vector3(x, y, z)));
-    }
-}
-
+const maxSquids = 120;
 
 // ======== NPC PENGUINS ========
 class NpcPenguin {
@@ -420,15 +680,22 @@ class NpcPenguin {
     visuals: THREE.Group;
     isFollowing = false;
     isInWater = false;
-    chasingSquid: Squid | null = null;
+    isSliding = false;
+    slideTimer = 0;
+    slideDelay = Math.random() * 0.5;
+    isBaby = false;
 
-    constructor(position: THREE.Vector3) {
+    constructor(position: THREE.Vector3, scale: number = 1) {
+        this.isBaby = scale < 0.8;
+        const radius = penguinRadius * scale;
+        const height = penguinHeight * scale;
+        
         this.body = new CANNON.Body({
-            mass: 6,
+            mass: 6 * scale, // Lighter babies
             position: new CANNON.Vec3(position.x, position.y, position.z),
             linearDamping: 0.9,
             material: penguinMaterial,
-            shape: new CANNON.Sphere(penguinRadius)
+            shape: new CANNON.Sphere(radius)
         });
         world.addBody(this.body);
 
@@ -436,27 +703,29 @@ class NpcPenguin {
         const randomHue = Math.random() * 360;
         const backColor = `hsl(${randomHue}, 30%, 15%)`;
         const npcTexture = generatePenguinTexture(backColor);
+        
         const bodyMesh = new THREE.Mesh(
-            new THREE.CapsuleGeometry(penguinRadius, penguinHeight, 8, 16),
+            new THREE.CapsuleGeometry(radius, height, 8, 16),
             new THREE.MeshStandardMaterial({ map: npcTexture })
         );
         bodyMesh.castShadow = true;
         this.visuals.add(bodyMesh);
 
         const noseMesh = new THREE.Mesh(
-            new THREE.ConeGeometry(0.2, 0.4, 8),
+            new THREE.ConeGeometry(0.2 * scale, 0.4 * scale, 8),
             new THREE.MeshStandardMaterial({ color: 0xffa500 })
         );
-        noseMesh.position.set(0, 0.2, penguinRadius + 0.1);
+        noseMesh.position.set(0, 0.2 * scale, radius + 0.1 * scale);
         noseMesh.rotation.x = Math.PI / 2;
         this.visuals.add(noseMesh);
         
-        const npcLeftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        npcLeftEye.position.set(0.2, 0.5, penguinRadius);
+        const eyeGeom = new THREE.SphereGeometry(0.08 * scale, 16, 16);
+        const npcLeftEye = new THREE.Mesh(eyeGeom, eyeMaterial);
+        npcLeftEye.position.set(0.15 * scale, 0.4 * scale, radius);
         this.visuals.add(npcLeftEye);
 
-        const npcRightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        npcRightEye.position.set(-0.2, 0.5, penguinRadius);
+        const npcRightEye = new THREE.Mesh(eyeGeom, eyeMaterial);
+        npcRightEye.position.set(-0.15 * scale, 0.4 * scale, radius);
         this.visuals.add(npcRightEye);
         
         scene.add(this.visuals);
@@ -468,19 +737,110 @@ class NpcPenguin {
     }
 }
 
+// ======== LEVEL SYSTEM ========
 const npcPenguins: NpcPenguin[] = [];
-const npcPositions = [
-    new THREE.Vector3(10, terrainMaxHeight + 5, 10),
-    new THREE.Vector3(12, terrainMaxHeight + 5, 10),
-    new THREE.Vector3(10, terrainMaxHeight + 5, 12),
-    new THREE.Vector3(-15, terrainMaxHeight + 5, -15),
-    new THREE.Vector3(-17, terrainMaxHeight + 5, -15),
-];
 
-npcPositions.forEach(pos => {
-    npcPenguins.push(new NpcPenguin(pos));
+function clearEntities() {
+    // Clear NPCs
+    npcPenguins.forEach(npc => {
+        if (npc.body) world.removeBody(npc.body);
+        if (npc.visuals) scene.remove(npc.visuals);
+    });
+    npcPenguins.length = 0;
+
+    // Clear Squids
+    squids.forEach(squid => {
+        if (squid.body) world.removeBody(squid.body);
+        if (squid.visuals) scene.remove(squid.visuals);
+    });
+    squids.length = 0;
+}
+
+function spawnNpcs() {
+    let spawnedCount = 0;
+    while (spawnedCount < 30) {
+        const x = (Math.random() - 0.5) * terrainSize * 0.9;
+        const z = (Math.random() - 0.5) * terrainSize * 0.9;
+        const y = getHeight(x, -z);
+        
+        // Check if Land (Above water)
+        if (y > waterLevel + 0.5) {
+            const isBaby = Math.random() > 0.5;
+            const scale = isBaby ? 0.5 : 1.0;
+            const npc = new NpcPenguin(new THREE.Vector3(x, y + 1, z), scale);
+            npc.body.quaternion.set(0, 0, 0, 1); // Force upright
+            npc.body.angularVelocity.set(0, 0, 0); // No spin
+            npc.body.angularDamping = 0.99; // Keep upright
+            npcPenguins.push(npc);
+            spawnedCount++;
+        }
+    }
+}
+
+function spawnSquids() {
+    let attempts = 0;
+    while (squids.length < maxSquids && attempts < 5000) { 
+        attempts++;
+        const x = (Math.random() - 0.5) * terrainSize * 0.9;
+        const z = (Math.random() - 0.5) * terrainSize * 0.9;
+        const terrainY = getHeight(x, -z);
+        
+        if (waterLevel > terrainY + 1.5) {
+            const minY = terrainY + 0.8;
+            const maxY = waterLevel - 0.5;
+            const y = minY + Math.random() * (maxY - minY);
+            const type = Math.floor(Math.random() * 4);
+            squids.push(new Squid(new THREE.Vector3(x, y, z), type));
+        }
+    }
+}
+
+function resetPlayer() {
+    penguinBody.position.set(-25, 20, 0);
+    penguinBody.velocity.set(0, 0, 0);
+    penguinBody.angularVelocity.set(0, 0, 0);
+    penguinBody.quaternion.set(0, 0, 0, 1);
+    hunger = 100;
+    isDead = false;
+}
+
+function setLevel(id: number) {
+    clearEntities();
+    resetPlayer();
+    
+    // Default: Show Water & Snow (Level 2 & 3)
+    waterMesh.visible = true;
+    marineSnowSystem.visible = true;
+
+    if (id === 1) {
+        // Level 1: Snow Terrain + NPCs (No Water Visuals/Effects)
+        spawnNpcs();
+        waterMesh.visible = false;
+        marineSnowSystem.visible = false;
+        console.log("Level 1 Loaded: Snow + NPCs");
+    } else if (id === 2) {
+        // Level 2: Snow + Water (No Entities)
+        console.log("Level 2 Loaded: Water Debug");
+    } else if (id === 3) {
+        // Level 3: Full Game
+        spawnNpcs();
+        spawnSquids();
+        console.log("Level 3 Loaded: Full Game");
+    }
+}
+
+// Initial Load
+setLevel(3);
+
+// Input for Levels
+document.addEventListener('keydown', (e) => {
+    if (e.key === '1') setLevel(1);
+    if (e.key === '2') setLevel(2);
+    if (e.key === '3') setLevel(3);
 });
 
+// ======== CATCH PLANE ========
+/* Predator removed */
 
 // ======== CONTROLS & MOVEMENT ========
 const keys: { [key: string]: boolean } = {};
@@ -502,14 +862,14 @@ document.addEventListener('keydown', (event) => {
         isSliding = true;
     }
     
-    if (key === ' ') {
-        if ((canJump && penguinBody.velocity.y < 1) || playerIsInWater) {
-            // Anticipatory tilt
+    if (key === ' ' && !event.repeat) {
+        if ((canJump && penguinBody.velocity.y < 5) || playerIsInWater) {
+            // Anticipatory tilt (Stronger)
             const tilt = new CANNON.Quaternion();
-            tilt.setFromEuler(-0.5, 0, 0); // Tilt back
+            tilt.setFromEuler(-0.8, 0, 0); // Tilt back more
             penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
             
-            penguinBody.velocity.y = 12; // Slightly higher jump
+            penguinBody.velocity.y = isSprinting ? 35 : 18; // Higher jumps
             canJump = false;
         }
     }
@@ -531,21 +891,72 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
+// -- Touch Controls (Tap to Move) --
+let moveTarget: THREE.Vector3 | null = null;
+let touchSlideId = -1;
+
+document.addEventListener('touchstart', (e) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        
+        // Right side: Actions
+        if (t.clientX > window.innerWidth / 2) {
+             if (touchSlideId === -1) {
+                 touchSlideId = t.identifier;
+                 // Jump on touch start
+                if ((canJump && penguinBody.velocity.y < 5) || playerIsInWater) {
+                    const tilt = new CANNON.Quaternion();
+                    tilt.setFromEuler(-0.5, 0, 0); 
+                    penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
+                    penguinBody.velocity.y = 12;
+                    canJump = false;
+                }
+                isSliding = true; // Hold to slide
+             }
+        } else {
+            // Left side: Tap to move
+            // Raycast to find target
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+            mouse.x = (t.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            
+            const intersects = raycaster.intersectObject(terrainMesh);
+            if (intersects.length > 0) {
+                moveTarget = intersects[0].point;
+                isSprinting = true; // Always sprint on touch? Or just walk. Let's sprint.
+            }
+        }
+    }
+}, { passive: false });
+
+document.addEventListener('touchend', (e) => {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        if (t.identifier === touchSlideId) {
+            touchSlideId = -1;
+            isSliding = false;
+        }
+    }
+});
+
 const moveVelocity = 5;
-const sprintMoveVelocity = 12;
+const sprintMoveVelocity = 22;
 let isSliding = false;
 let isSprinting = false;
 let canJump = false;
 let playerIsInWater = false;
 
 function checkGround() {
-    // Direct height check is more robust for procedural terrain
+    // Direct height check is reliable for procedural terrain
     // Note: Mesh is rotated -90 on X, so world Z corresponds to -local Y (which was passed to getHeight)
     const terrainHeight = getHeight(penguinBody.position.x, -penguinBody.position.z);
     const distanceToGround = penguinBody.position.y - terrainHeight;
     
     // Bottom of penguin is at y - penguinRadius
-    if (distanceToGround < penguinRadius + 0.3) {
+    // Allow jump if within 0.8 units of ground (very permissive)
+    if (distanceToGround < penguinRadius + 0.8) {
         canJump = true;
     } else {
         canJump = false;
@@ -553,6 +964,14 @@ function checkGround() {
 }
 
 function updatePenguinMovement() {
+    if (isDead) return;
+
+    // Respawn if fell off
+    if (penguinBody.position.y < -30) {
+        penguinBody.position.set(-25, 20, 0); // Spawn on land
+        penguinBody.velocity.set(0, 0, 0);
+    }
+
     checkGround();
 
     // Water splash check
@@ -562,21 +981,37 @@ function updatePenguinMovement() {
         createSplash(penguinBody.position);
     }
     
+    // Eating Squids/Fish
+    for (let i = squids.length - 1; i >= 0; i--) {
+        const squid = squids[i];
+        if (penguinBody.position.distanceTo(squid.position) < 1.5) {
+            scene.remove(squid.visuals);
+            squids.splice(i, 1);
+            hunger = Math.min(100, hunger + 20);
+        }
+    }
+
     const input = { f: keys['w'], b: keys['s'], l: keys['a'], r: keys['d'] };
 
     if (playerIsInWater) {
         penguinBody.material = penguinMaterial;
         penguinBody.linearDamping = 0.8;
         
-        // Buoyancy
-        const depth = waterLevel - penguinBody.position.y;
-        if (depth > 0) {
-             // Spring-like buoyancy
-             penguinBody.force.y += 200 * depth - penguinBody.velocity.y * 10;
+        // Diving Logic
+        if (isSliding) {
+             // Dive down
+             penguinBody.force.y -= 50; 
+        } else {
+            // Buoyancy (only when not diving)
+            const depth = waterLevel - penguinBody.position.y;
+            if (depth > 0) {
+                 // Spring-like buoyancy (Reduced)
+                 penguinBody.force.y += 140 * depth - penguinBody.velocity.y * 10;
+            }
         }
     } else if (isSliding) {
         penguinBody.material = penguinSlidingMaterial;
-        penguinBody.linearDamping = 0.05; // Low damping for sliding
+        penguinBody.linearDamping = 0.01; // Ultra low damping for ice slide
         
         // Apply downhill force
         const start = penguinBody.position;
@@ -594,16 +1029,40 @@ function updatePenguinMovement() {
             const perp = normal.scale(dot);
             const parallel = gravity.vsub(perp);
             
-            penguinBody.force.x += parallel.x * 2; // Boost gravity effect
-            penguinBody.force.z += parallel.z * 2;
+            penguinBody.force.x += parallel.x * 5; // Stronger gravity effect on slopes
+            penguinBody.force.z += parallel.z * 5;
         }
 
-        // Lock tumbling while sliding, and remove steering
+        // Lock tumbling while sliding
         penguinBody.angularVelocity.set(0, 0, 0);
-        return;
+        
+        // Steering Forces while sliding
+        const rightDir = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+        const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
+        
+        const steerForce = 10;
+        if (input.l) {
+            penguinBody.force.x -= rightDir.x * steerForce;
+            penguinBody.force.z -= rightDir.z * steerForce;
+        }
+        if (input.r) {
+            penguinBody.force.x += rightDir.x * steerForce;
+            penguinBody.force.z += rightDir.z * steerForce;
+        }
+        // Boost/Brake
+        if (input.f) {
+            penguinBody.force.x -= camDir.x * steerForce;
+            penguinBody.force.z -= camDir.z * steerForce;
+        }
+        // Don't return, let velocity update happen but maybe override it?
+        // Actually, if we don't return, the WASD logic below will OVERWRITE velocity.x/z based on speed.
+        // We want SLIDING physics (force based) not WALKING physics (velocity based).
+        return; 
     } else {
         penguinBody.material = penguinMaterial;
         penguinBody.linearDamping = 0.9; // High damping for walking
+        // Lock tumbling while walking to stay upright
+        penguinBody.angularVelocity.set(0, 0, 0);
     }
 
     // Standard WASD movement
@@ -628,9 +1087,10 @@ function updatePenguinMovement() {
         const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
         
         if (playerIsInWater) {
-             // Steep forward lean for swimming
+             // Steep forward lean for swimming/diving
              const lean = new CANNON.Quaternion();
-             lean.setFromEuler(Math.PI / 2.5, 0, 0); // ~70 degrees forward
+             const leanAngle = isSliding ? Math.PI / 1.8 : Math.PI / 2.5;
+             lean.setFromEuler(leanAngle, 0, 0); 
              targetRot.mult(lean, targetRot);
         }
         
@@ -640,6 +1100,17 @@ function updatePenguinMovement() {
         penguinBody.velocity.z *= 0.8;
     }
     penguinBody.velocity.y = currentYVelocity;
+
+    // --- BOUNDARY CHECK ---
+    const halfSize = terrainSize / 2 - 1.0; // Buffer
+    if (Math.abs(penguinBody.position.x) > halfSize) {
+        penguinBody.position.x = Math.sign(penguinBody.position.x) * halfSize;
+        penguinBody.velocity.x = 0;
+    }
+    if (Math.abs(penguinBody.position.z) > halfSize) {
+        penguinBody.position.z = Math.sign(penguinBody.position.z) * halfSize;
+        penguinBody.velocity.z = 0;
+    }
     
     // Weaker tumble damping while walking/running
     penguinBody.angularVelocity.x *= 0.5;
@@ -709,45 +1180,120 @@ function updateParticles() {
     snowParticles.geometry.attributes.position.needsUpdate = true;
 }
 
-function createSplash(position: CANNON.Vec3) {
-    for (let i = 0; i < 20; i++) { // 20 particles per splash
-        const particleIndex = nextSplashParticle;
-        splashParticlePositions[particleIndex * 3] = position.x + (Math.random() - 0.5) * 0.5;
-        splashParticlePositions[particleIndex * 3 + 1] = waterLevel;
-        splashParticlePositions[particleIndex * 3 + 2] = position.z + (Math.random() - 0.5) * 0.5;
+// ======== BLOOD PARTICLES ========
+const bloodParticleCount = 50;
+const bloodParticleGeometry = new THREE.BufferGeometry();
+const bloodParticlePositions = new Float32Array(bloodParticleCount * 3);
+const bloodParticleVelocities = Array.from({ length: bloodParticleCount }, () => new THREE.Vector3());
+const bloodParticleLifespans = new Float32Array(bloodParticleCount);
+let nextBloodParticle = 0;
 
-        splashParticleVelocities[particleIndex].set(
-            (Math.random() - 0.5) * 0.2,
-            (Math.random()) * 0.2 + 0.1,
-            (Math.random() - 0.5) * 0.2
-        );
-        splashParticleLifespans[particleIndex] = Math.random() * 30 + 30;
-        nextSplashParticle = (nextSplashParticle + 1) % splashParticleCount;
+for (let i = 0; i < bloodParticleCount; i++) {
+    bloodParticlePositions[i * 3] = 0;
+    bloodParticlePositions[i * 3 + 1] = -100;
+    bloodParticlePositions[i * 3 + 2] = 0;
+    bloodParticleLifespans[i] = 0;
+}
+
+bloodParticleGeometry.setAttribute('position', new THREE.BufferAttribute(bloodParticlePositions, 3));
+
+const bloodParticleMaterial = new THREE.PointsMaterial({
+    map: createCircleTexture(),
+    color: 0xff0000, // Red
+    size: 0.3,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    transparent: true,
+    opacity: 0.8
+});
+
+const bloodParticles = new THREE.Points(bloodParticleGeometry, bloodParticleMaterial);
+bloodParticles.frustumCulled = false;
+scene.add(bloodParticles);
+
+function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood: boolean = false) {
+    const scale = Math.min(3, impactVelocity / 8); 
+    const particleCount = Math.max(5, Math.floor(20 * scale));
+    
+    // Select system
+    let positions, velocities, lifespans, nextIdx, maxCount, geo;
+    if (isBlood) {
+        positions = bloodParticlePositions;
+        velocities = bloodParticleVelocities;
+        lifespans = bloodParticleLifespans;
+        nextIdx = nextBloodParticle;
+        maxCount = bloodParticleCount;
+        geo = bloodParticleGeometry;
+    } else {
+        positions = splashParticlePositions;
+        velocities = splashParticleVelocities;
+        lifespans = splashParticleLifespans;
+        nextIdx = nextSplashParticle;
+        maxCount = splashParticleCount;
+        geo = splashParticleGeometry;
     }
+
+    for (let i = 0; i < particleCount; i++) { 
+        const particleIndex = nextIdx;
+        const spread = 0.5 * scale;
+        
+        positions[particleIndex * 3] = position.x + (Math.random() - 0.5) * spread;
+        positions[particleIndex * 3 + 1] = waterLevel; // Or hit position?
+        positions[particleIndex * 3 + 2] = position.z + (Math.random() - 0.5) * spread;
+
+        velocities[particleIndex].set(
+            (Math.random() - 0.5) * 0.2 * scale,
+            (Math.random()) * 0.2 * scale + 0.1,
+            (Math.random() - 0.5) * 0.2 * scale
+        );
+        lifespans[particleIndex] = (Math.random() * 30 + 30) * scale;
+        nextIdx = (nextIdx + 1) % maxCount;
+    }
+    
+    if (isBlood) nextBloodParticle = nextIdx;
+    else nextSplashParticle = nextIdx;
+    
+    geo.attributes.position.needsUpdate = true;
 }
 
 function updateSplashParticles() {
-    const positions = splashParticles.geometry.attributes.position.array as Float32Array;
-
+    // Water
+    let positions = splashParticles.geometry.attributes.position.array as Float32Array;
     for (let i = 0; i < splashParticleCount; i++) {
         if (splashParticleLifespans[i] > 0) {
             splashParticleLifespans[i]--;
             positions[i * 3] += splashParticleVelocities[i].x;
             positions[i * 3 + 1] += splashParticleVelocities[i].y;
             positions[i * 3 + 2] += splashParticleVelocities[i].z;
-            splashParticleVelocities[i].y -= 0.01; // Gravity
+            splashParticleVelocities[i].y -= 0.01; 
         } else {
             positions[i * 3 + 1] = -100;
         }
     }
     splashParticles.geometry.attributes.position.needsUpdate = true;
+
+    // Blood
+    positions = bloodParticles.geometry.attributes.position.array as Float32Array;
+    for (let i = 0; i < bloodParticleCount; i++) {
+        if (bloodParticleLifespans[i] > 0) {
+            bloodParticleLifespans[i]--;
+            positions[i * 3] += bloodParticleVelocities[i].x;
+            positions[i * 3 + 1] += bloodParticleVelocities[i].y;
+            positions[i * 3 + 2] += bloodParticleVelocities[i].z;
+            bloodParticleVelocities[i].y -= 0.01; 
+        } else {
+            positions[i * 3 + 1] = -100;
+        }
+    }
+    bloodParticles.geometry.attributes.position.needsUpdate = true;
 }
 
 function updateNpcs() {
-    const followDistance = 8; // Increased range
-    const followSpeed = 4.5; // 90% of player speed
+    const followDistance = 8; 
+    const followSpeed = 4.5;
+    const separationDist = 1.5;
 
-    npcPenguins.forEach(npc => {
+    npcPenguins.forEach((npc, index) => {
         // Water splash check
         const wasInWater = npc.isInWater;
         npc.isInWater = npc.body.position.y < waterLevel + penguinRadius;
@@ -755,29 +1301,122 @@ function updateNpcs() {
             createSplash(npc.body.position);
         }
         
-        // Buoyancy for NPCs
+        // Buoyancy
         if (npc.isInWater) {
              const depth = waterLevel - npc.body.position.y;
              if (depth > 0) {
                  npc.body.force.y += 200 * depth - npc.body.velocity.y * 10;
              }
              npc.body.linearDamping = 0.8;
+        } else if (npc.isSliding) {
+             npc.body.linearDamping = 0.01;
         } else {
              npc.body.linearDamping = 0.9;
         }
 
-        const distanceToPlayer = npc.body.position.distanceTo(penguinBody.position);
+        // Synchronized Sliding
+        if (isSliding && !npc.isInWater) {
+            if (npc.slideTimer < npc.slideDelay) {
+                npc.slideTimer += 1/60; 
+            } else {
+                npc.isSliding = true;
+            }
+        } else {
+            npc.isSliding = false;
+            npc.slideTimer = 0;
+        }
+        
+        // Eating Squids
+        for (let i = squids.length - 1; i >= 0; i--) {
+            const squid = squids[i];
+            if (npc.body.position.distanceTo(squid.position) < 1.5) {
+                scene.remove(squid.visuals);
+                squids.splice(i, 1);
+            }
+        }
 
-        if (distanceToPlayer < followDistance) {
+        // Separation (avoid bunching)
+        for (let j = 0; j < npcPenguins.length; j++) {
+            if (index === j) continue;
+            const other = npcPenguins[j];
+            const dist = npc.body.position.distanceTo(other.body.position);
+            if (dist < separationDist) {
+                const push = npc.body.position.vsub(other.body.position);
+                push.normalize();
+                push.scale(10, push); 
+                npc.body.force.vadd(push, npc.body.force);
+            }
+        }
+
+        // Target Selection (Baby follows Adult, Adult follows Player)
+        let targetPos = penguinBody.position;
+        if (npc.isBaby) {
+             let minD = 1000;
+             let nearestAdult = null;
+             for (const other of npcPenguins) {
+                 if (!other.isBaby) {
+                     const d = npc.body.position.distanceTo(other.body.position);
+                     if (d < minD) {
+                         minD = d;
+                         nearestAdult = other;
+                     }
+                 }
+             }
+             if (nearestAdult && minD < 30) {
+                 targetPos = nearestAdult.body.position;
+             }
+        }
+
+        const distanceToTarget = npc.body.position.distanceTo(targetPos);
+
+        if (distanceToTarget < followDistance) {
             npc.isFollowing = true;
         }
 
         if (npc.isFollowing) {
-            const direction = penguinBody.position.vsub(npc.body.position);
+            const direction = targetPos.vsub(npc.body.position);
             direction.normalize();
-            npc.body.velocity.x = direction.x * followSpeed;
-            npc.body.velocity.z = direction.z * followSpeed;
             
+            // Movement Logic
+            if (distanceToTarget > 3.0) { // Stop if too close (Don't crowd)
+                if (npc.isSliding) {
+                     // Sliding physics (Downhill + Follow momentum)
+                     const start = npc.body.position;
+                     const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 1.0), start.z);
+                     const result = new CANNON.RaycastResult();
+                     result.reset();
+                     world.raycastClosest(start, end, {}, result);
+
+                     if (result.hasHit) {
+                        const groundNormal = result.hitNormalWorld;
+                        const gravity = new CANNON.Vec3(0, -25, 0);
+                        const normal = groundNormal;
+                        const dot = gravity.dot(normal);
+                        const perp = normal.scale(dot);
+                        const parallel = gravity.vsub(perp);
+                        
+                        npc.body.force.x += parallel.x * 5; 
+                        npc.body.force.z += parallel.z * 5;
+                     }
+                     
+                     // Steering while sliding (weak)
+                     npc.body.force.x += direction.x * 5;
+                     npc.body.force.z += direction.z * 5;
+
+                } else {
+                     // Walking
+                     npc.body.velocity.x = direction.x * followSpeed;
+                     npc.body.velocity.z = direction.z * followSpeed;
+                }
+            } else {
+                // Stop moving if close, but dampen slide
+                if (!npc.isSliding) {
+                    npc.body.velocity.x *= 0.8;
+                    npc.body.velocity.z *= 0.8;
+                }
+            }
+            
+            // Visual Rotation
             const angle = Math.atan2(npc.body.velocity.x, npc.body.velocity.z);
             const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
             
@@ -789,17 +1428,36 @@ function updateNpcs() {
             
             npc.body.quaternion.slerp(targetRot, 0.15, npc.body.quaternion);
         } else {
-            // Idle wander
+            // Natural Wander
+            // 2% chance to change wander state
             if (Math.random() > 0.98) {
-                npc.body.angularVelocity.y = (Math.random() - 0.5) * 5;
+                // Pick a random direction
+                const angle = Math.random() * Math.PI * 2;
+                const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
+                npc.body.quaternion.slerp(targetRot, 0.5, npc.body.quaternion);
+                
+                // Move forward
+                const forward = new CANNON.Vec3(0, 0, 1);
+                npc.body.quaternion.vmult(forward, forward);
+                npc.body.velocity.x = forward.x * 2.0; // Slow walk
+                npc.body.velocity.z = forward.z * 2.0;
+            } else {
+                // Keep moving a bit (damped)
+                npc.body.velocity.x *= 0.95;
+                npc.body.velocity.z *= 0.95;
             }
-            // Small forward hop occasionally
-            if (Math.random() > 0.99) {
-                 const forward = new CANNON.Vec3(0, 0, 1);
-                 npc.body.quaternion.vmult(forward, forward);
-                 npc.body.velocity.x += forward.x * 2;
-                 npc.body.velocity.z += forward.z * 2;
-                 npc.body.velocity.y += 2; // mini hop
+            
+            // Visual Rotation for Wander
+            if (npc.body.velocity.length() > 0.1) {
+                 const angle = Math.atan2(npc.body.velocity.x, npc.body.velocity.z);
+                 const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
+                 
+                 if (npc.isInWater) {
+                     const lean = new CANNON.Quaternion();
+                     lean.setFromEuler(Math.PI / 2.5, 0, 0); 
+                     targetRot.mult(lean, targetRot);
+                 }
+                 npc.body.quaternion.slerp(targetRot, 0.1, npc.body.quaternion);
             }
         }
         
@@ -819,15 +1477,46 @@ const slidingQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-8
 function animate() {
     requestAnimationFrame(animate);
     const deltaTime = clock.getDelta();
+    const elapsedTime = clock.getElapsedTime();
     world.step(1 / 60, deltaTime, 3);
+    
+    // Water Waves (Box Geometry - Fixed)
+    const positions = waterMesh.geometry.attributes.position.array as Float32Array;
+    const topY = waterDepth / 2; // 10
+    
+    for (let i = 0; i < positions.length; i += 3) {
+        // Only animate vertices near the top
+        // Use a threshold because previous frames might have moved them slightly down
+        if (positions[i + 1] > topY - 2.0) { 
+            const x = positions[i];
+            const z = positions[i + 2];
+            
+            let waveHeight = 0;
+            // Wave 1 (Swell)
+            waveHeight += Math.sin(x * 0.1 + elapsedTime * 0.5) * 0.5;
+            // Wave 2 (Cross)
+            waveHeight += Math.cos(z * 0.15 + elapsedTime * 0.4) * 0.4;
+            // Wave 3 (Chop)
+            waveHeight += Math.sin((x + z) * 0.3 + elapsedTime * 1.5) * 0.2;
+            
+            // Set absolute position (Fixes accumulation bug)
+            positions[i + 1] = topY + waveHeight;
+        }
+    }
+    waterMesh.geometry.attributes.position.needsUpdate = true;
+    waterMesh.geometry.computeVertexNormals();
+    
+    // Marine Snow Pulse
+    (marineSnowSystem.material as THREE.PointsMaterial).opacity = 0.4 + Math.sin(elapsedTime * 2) * 0.2;
     
     updatePenguinMovement();
     updateParticles();
     updateSplashParticles();
+    updateMarineSnow();
     updateNpcs();
     updateSquids();
     
-    // Sync physics with main group
+    // Update animated objects (door)
     penguinGroup.position.x = penguinBody.position.x;
     penguinGroup.position.y = penguinBody.position.y - penguinRadius + (penguinHeight / 2); // Offset for single sphere
     penguinGroup.position.z = penguinBody.position.z;
@@ -838,6 +1527,14 @@ function animate() {
         visualsGroup.quaternion.slerp(slidingQuaternion, 0.2);
     } else {
         visualsGroup.quaternion.slerp(uprightQuaternion, 0.2);
+    }
+
+    if (isDead) {
+        statsDiv.innerHTML = "YOU DIED";
+    } else {
+        hunger -= 0.01; // Decay
+        if (hunger <= 0) isDead = true;
+        statsDiv.innerHTML = `Energy: ${Math.floor(hunger)}%`;
     }
 
     controls.target.copy(penguinGroup.position);
