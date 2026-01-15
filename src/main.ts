@@ -75,20 +75,16 @@ world.addContactMaterial(groundPenguinSlidingContact);
 
 // ======== PROCEDURAL TERRAIN ========
 const noise2D = createNoise2D();
-const terrainSize = 64; // Reduced from 128
-const terrainMaxHeight = 20; 
-const visResolution = 64; // Match terrain size
+const terrainSize = 64; 
+const visResolution = 64; 
+const waterLevel = 0;
+const waterDepth = 20;
 
 function getHeight(x: number, z: number): number {
     // Scaled for smaller world (divisors halved)
     const baseNoise = noise2D(x / 40, z / 40) * 12; 
     
-    // Transition parameter (sigmoid-like) based on X
-    // x < 0 is land, x > 0 is sea generally
-    const t = 1 / (1 + Math.exp(x / 5)); // Sharper transition
-    
-    // Modulate the transition steepness with Z
-    // fast transition = cliff, slow transition = slope
+    // Transition
     const coastVar = noise2D(z / 20, 100) * 0.5 + 0.5; 
     
     let height = 0;
@@ -109,8 +105,8 @@ function getHeight(x: number, z: number): number {
         
         // Mega Ramp in the center (Z between -10 and 10)
         if (Math.abs(z) < 10) {
-            // Smooth Ramp
-            blend = u; 
+             // Smooth Ramp
+             blend = u; 
         } else if (coastVar < 0.3) {
              // Cliff: Sharp step
              blend = u < 0.5 ? 0 : 1; 
@@ -133,6 +129,46 @@ function getHeight(x: number, z: number): number {
     return height;
 }
 
+// ======== GERSTNER WAVES ========
+const waveCount = 10;
+const shoreDir = new THREE.Vector2(0, 1).normalize(); // Toward +Z
+const spread = (35 * Math.PI) / 180;
+const waveK = [0.55, 0.78, 1.05, 1.32, 1.62, 1.95, 2.30, 2.75, 3.15, 3.70];
+const waveAmp = [0.22, 0.15, 0.11, 0.085, 0.065, 0.050, 0.038, 0.030, 0.024, 0.020];
+const waveSpeed = [1.05, 1.18, 1.30, 1.42, 1.55, 1.70, 1.86, 2.02, 2.18, 2.35];
+const waveDirs: THREE.Vector2[] = [];
+
+for (let i = 0; i < waveCount; i++) {
+    if (i < 7) {
+        const angle = (Math.random() - 0.5) * 2 * spread;
+        const dir = shoreDir.clone().rotateAround(new THREE.Vector2(0, 0), angle);
+        waveDirs.push(dir);
+    } else {
+        const angle = Math.random() * Math.PI * 2;
+        waveDirs.push(new THREE.Vector2(Math.cos(angle), Math.sin(angle)));
+    }
+}
+
+function getWaveHeight(x: number, z: number, time: number): number {
+    let height = 0;
+    for (let i = 0; i < waveCount; i++) {
+        const phase = (x * waveDirs[i].x + z * waveDirs[i].y) * waveK[i] + time * waveSpeed[i];
+        height += waveAmp[i] * Math.sin(phase);
+    }
+    return waterLevel + height;
+}
+
+function getGerstnerPosition(x: number, z: number, time: number): THREE.Vector3 {
+    const pos = new THREE.Vector3(x, waterLevel, z);
+    const chop = 1.2;
+    for (let i = 0; i < waveCount; i++) {
+        const phase = (x * waveDirs[i].x + z * waveDirs[i].y) * waveK[i] + time * waveSpeed[i];
+        pos.y += waveAmp[i] * Math.sin(phase);
+        pos.x += waveAmp[i] * Math.cos(phase) * waveDirs[i].x * chop;
+        pos.z += waveAmp[i] * Math.cos(phase) * waveDirs[i].y * chop;
+    }
+    return pos;
+}
 // 1. Top Surface (Detailed)
 const terrainGeometry = new THREE.PlaneGeometry(terrainSize, terrainSize, visResolution - 1, visResolution - 1);
 const vertices = terrainGeometry.attributes.position.array as unknown as number[];
@@ -145,6 +181,11 @@ terrainGeometry.computeVertexNormals();
 
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
+
+const terrainUniforms = {
+    uTime: { value: 0 },
+    uWaterLevel: { value: waterLevel }
+};
 
 const topMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, side: THREE.DoubleSide, roughness: 0.9 });
 const topMesh = new THREE.Mesh(terrainGeometry, topMaterial);
@@ -245,23 +286,17 @@ world.addBody(terrainBody);
 
 // ======== CATCH PLANE ========
 
-const catchPlaneGeometry = new THREE.PlaneGeometry(terrainSize * 2, terrainSize * 2);
-
 // ======== WATER ========
-const waterLevel = 0;
-const waterDepth = 20;
 const waterGeometry = new THREE.BoxGeometry(terrainSize - 0.2, waterDepth, terrainSize - 0.2, 64, 1, 64);
 
-const sideMat = new THREE.MeshPhysicalMaterial({
-    color: 0x88ccff, // Brighter
+const sideMat = new THREE.MeshStandardMaterial({
+    color: 0x44aaff,
     transparent: true,
-    transmission: 1.0, // Fully transmissive
-    opacity: 1,
-    metalness: 0.0,
-    roughness: 0.0, // No blur
-    ior: 1.33,
-    thickness: 0.5, // Less absorption
-    side: THREE.FrontSide
+    opacity: 0.3,
+    metalness: 0.1,
+    roughness: 0.1,
+    side: THREE.FrontSide,
+    depthWrite: false
 });
 
 const topMat = new THREE.MeshStandardMaterial({
@@ -270,7 +305,9 @@ const topMat = new THREE.MeshStandardMaterial({
     opacity: 0.6,
     metalness: 0.1,
     roughness: 0.0, // Shiny top
-    side: THREE.DoubleSide
+    side: THREE.DoubleSide,
+    depthWrite: false, // Fix particle visibility
+    depthTest: true,
 });
 
 const waterMaterials = [
@@ -284,7 +321,210 @@ const waterMaterials = [
 
 const waterMesh = new THREE.Mesh(waterGeometry, waterMaterials);
 waterMesh.position.y = waterLevel - waterDepth / 2;
+waterMesh.userData.basePositions = (waterMesh.geometry.attributes.position.array as Float32Array).slice();
 scene.add(waterMesh);
+
+// ======== ICEBERGS ========
+const icebergs: { body: CANNON.Body, mesh: THREE.Group }[] = [];
+
+function createIcebergs() {
+    const iceMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.1 });
+    
+    for (let i = 0; i < 6; i++) {
+        const x = 15 + Math.random() * 40; 
+        const z = (Math.random() - 0.5) * 60;
+        
+        // 10-sided Irregular Polygon
+        const shape = new THREE.Shape();
+        const numPoints = 10;
+        const radius = 3 + Math.random() * 3;
+        
+        for (let j = 0; j < numPoints; j++) {
+            const angle = (j / numPoints) * Math.PI * 2;
+            const r = radius * (0.6 + Math.random() * 0.8); // High variance
+            const px = Math.cos(angle) * r;
+            const py = Math.sin(angle) * r;
+            if (j === 0) shape.moveTo(px, py);
+            else shape.lineTo(px, py);
+        }
+        
+        const extrudeSettings = {
+            steps: 1,
+            depth: 1.5, 
+            bevelEnabled: true,
+            bevelThickness: 0.2,
+            bevelSize: 0.2,
+            bevelSegments: 1
+        };
+        
+        const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        geom.rotateX(Math.PI / 2); 
+        geom.translate(0, 0.5, 0); 
+        
+        const mesh = new THREE.Mesh(geom, iceMat);
+        
+        // Jagged bottom (Cone with same segment count)
+        const bottomGeom = new THREE.ConeGeometry(radius * 0.8, 4, numPoints);
+        bottomGeom.rotateX(Math.PI); 
+        const bottomMesh = new THREE.Mesh(bottomGeom, iceMat);
+        bottomMesh.position.y = -1.5;
+        
+        const group = new THREE.Group();
+        group.add(mesh);
+        group.add(bottomMesh);
+        group.position.set(x, waterLevel, z);
+        group.castShadow = true;
+        group.receiveShadow = true;
+        scene.add(group);
+        
+        // Physics (10-sided Cylinder approximation)
+        // Cannon Cylinder is Z-up. We need to rotate it to be Y-up.
+        const shapePhys = new CANNON.Cylinder(radius * 0.8, radius * 0.8, 1.5, 10);
+        const q = new CANNON.Quaternion();
+        q.setFromEuler(-Math.PI / 2, 0, 0);
+        
+        const body = new CANNON.Body({ mass: 2000 }); 
+        body.addShape(shapePhys, new CANNON.Vec3(0, 0, 0), q);
+        body.linearDamping = 0.9;
+        body.angularDamping = 0.9;
+        body.position.set(x, waterLevel, z);
+        world.addBody(body);
+        
+        icebergs.push({ body, mesh: group });
+    }
+}
+createIcebergs();
+
+// ======== REAL-TIME CAUSTICS (Projected) ========
+// Inject into Terrain Material
+topMaterial.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uRipple = { value: new THREE.Vector3(0, 0, -100) }; // x, z, startTime
+    topMaterial.userData.shader = shader;
+
+    shader.vertexShader = `
+        varying vec3 vWorldPosition;
+        ${shader.vertexShader}
+    `.replace(
+        '#include <worldpos_vertex>',
+        `
+        #include <worldpos_vertex>
+        vWorldPosition = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        `
+    );
+
+    shader.fragmentShader = `
+        uniform float uTime;
+        uniform vec3 uRipple;
+        varying vec3 vWorldPosition;
+        
+        // Match Water Waves + Ripple
+        float getCaustic(vec2 p, float t) {
+            float v = 0.0;
+            // Higher frequency, lower contrast
+            v += sin(p.x * 0.3 + t * 0.8);
+            v += cos(p.y * 0.35 + t * 0.6); 
+            v += sin((p.x + p.y) * 0.8 + t * 1.5);
+            
+            // Interactive Ripple
+            float d = distance(p, uRipple.xy);
+            float rt = t - uRipple.z; // Time since splash
+            if (rt > 0.0 && rt < 5.0) {
+                 float wave = sin(d * 2.0 - rt * 5.0);
+                 float mask = smoothstep(5.0, 0.0, d - rt * 2.0); // Ring mask
+                 float decay = exp(-rt * 0.5);
+                 v += wave * mask * decay * 2.0;
+            }
+            
+            return v;
+        }
+
+        // Helper Noise for Glitter/Cracks
+        float snowRand(vec2 co){
+            return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        }
+
+        ${shader.fragmentShader}
+    `.replace(
+        '#include <dithering_fragment>',
+        `
+        #include <dithering_fragment>
+        
+        if (vWorldPosition.y < 0.0) {
+            // ... (Underwater Logic remains, but updated below) ...
+            vec2 uv = vWorldPosition.xz;
+            float depth = -vWorldPosition.y;
+            
+            // 1. Caustics
+            float c = getCaustic(uv, uTime);
+            
+            // Variable sharpness: Blurry (low exp) near surface, Sharp (high exp) deep
+            float blurFactor = smoothstep(0.0, 8.0, depth);
+            float sharpness = mix(1.0, 15.0, blurFactor);
+            
+            c = pow(0.5 + 0.5 * sin(c * 5.0), sharpness);
+            
+            float deepFade = smoothstep(15.0, 5.0, depth);
+            // Softer fade near surface
+            float beachFade = smoothstep(0.5, 6.0, depth);
+            
+            float causticIntensity = c * 0.2 * deepFade * beachFade;
+            
+            // 2. Irregular Shoreline Ripples
+            float shoreNoise = sin(uv.x * 0.5) + cos(uv.y * 0.5); 
+            float shoreWave = sin(depth * 10.0 - uTime * 3.0 + shoreNoise * 2.0);
+            float shoreMask = smoothstep(5.0, 0.0, depth);
+            float shoreRipple = pow(0.5 + 0.5 * shoreWave, 4.0) * shoreMask * 0.3;
+            
+            // 3. Interactive Ripples (Smoother fade)
+            float interact = 0.0;
+            float d = distance(vWorldPosition.xz, uRipple.xy);
+            float rt = uTime - uRipple.z; 
+            if (rt > 0.0 && rt < 5.0) {
+                 float wave = sin(d * 2.0 - rt * 5.0);
+                 float mask = smoothstep(5.0, 0.0, d - rt * 2.0); 
+                 // Smooth fade out at end
+                 float timeFade = 1.0 - smoothstep(3.0, 5.0, rt); 
+                 float decay = exp(-rt * 0.5) * timeFade;
+                 interact = wave * mask * decay * 0.5;
+            }
+
+            float totalLight = causticIntensity + shoreRipple + interact;
+            vec3 deepBlue = vec3(0.0, 0.05, 0.2);
+            float fogFactor = smoothstep(0.0, 25.0, depth); 
+            
+            vec3 finalColor = mix(gl_FragColor.rgb, deepBlue, fogFactor * 0.95);
+            finalColor += vec3(0.7, 0.9, 1.0) * totalLight;
+            gl_FragColor.rgb = finalColor;
+            
+        } else {
+            // --- SNOW TERRAIN (Above Water) ---
+            vec2 uv = vWorldPosition.xz;
+            
+            // 1. Icy Cracks
+            // Use sine interference pattern for cracks
+            float crackNoise = sin(uv.x * 0.5) * cos(uv.y * 0.5) * sin((uv.x+uv.y)*0.2);
+            // Thin lines where noise is near 0
+            float crack = 1.0 - smoothstep(0.0, 0.05, abs(crackNoise)); 
+            
+            // 2. Snow Glitter
+            // View dependent sparkle? Approximate with noise + camera dist or just noise
+            float sparkle = snowRand(uv * 100.0); // High freq noise
+            // Make it sparse
+            sparkle = step(0.98, sparkle); 
+            
+            vec3 snowColor = vec3(0.95, 0.98, 1.0); // Soft blue-white
+            vec3 iceColor = vec3(0.7, 0.8, 1.0); // Blue crack
+            
+            vec3 finalSnow = mix(snowColor, iceColor, crack * 0.5);
+            finalSnow += vec3(1.0) * sparkle * 0.3; // Add glitter
+            
+            // Blend original shadow/lighting with our snow
+            gl_FragColor.rgb = gl_FragColor.rgb * finalSnow; 
+        }
+        `
+    );
+};
 
 // ======== PENGUIN ========
 const penguinRadius = 0.5;
@@ -395,6 +635,7 @@ const splashParticleGeometry = new THREE.BufferGeometry();
 const splashParticlePositions = new Float32Array(splashParticleCount * 3);
 const splashParticleVelocities = Array.from({ length: splashParticleCount }, () => new THREE.Vector3());
 const splashParticleLifespans = new Float32Array(splashParticleCount);
+const splashParticleOpacities = new Float32Array(splashParticleCount); // NEW
 let nextSplashParticle = 0;
 
 for (let i = 0; i < splashParticleCount; i++) {
@@ -402,18 +643,40 @@ for (let i = 0; i < splashParticleCount; i++) {
     splashParticlePositions[i * 3 + 1] = -100; // Start off-screen
     splashParticlePositions[i * 3 + 2] = 0;
     splashParticleLifespans[i] = 0;
+    splashParticleOpacities[i] = 0;
 }
 
 splashParticleGeometry.setAttribute('position', new THREE.BufferAttribute(splashParticlePositions, 3));
+splashParticleGeometry.setAttribute('opacity', new THREE.BufferAttribute(splashParticleOpacities, 1)); // NEW
 
-const splashParticleMaterial = new THREE.PointsMaterial({
-    map: createCircleTexture(),
-    color: 0x00aaff, // Blue splashes
-    size: 0.3,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
+const splashParticleMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        pointTexture: { value: createCircleTexture() },
+        color: { value: new THREE.Color(0x00aaff) }
+    },
+    vertexShader: `
+        attribute float opacity;
+        varying float vOpacity;
+        void main() {
+            vOpacity = opacity;
+            vec4 mvPosition = modelViewMatrix * vec4( position, 1.0 );
+            gl_PointSize = 8.0 * ( 30.0 / -mvPosition.z ); 
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `,
+    fragmentShader: `
+        uniform sampler2D pointTexture;
+        uniform vec3 color;
+        varying float vOpacity;
+        void main() {
+            vec4 tex = texture2D( pointTexture, gl_PointCoord );
+            if (tex.a < 0.1) discard;
+            gl_FragColor = vec4( color, vOpacity * tex.a * 0.8 );
+        }
+    `,
     transparent: true,
-    opacity: 0.8
+    depthWrite: false,
+    blending: THREE.AdditiveBlending
 });
 
 const splashParticles = new THREE.Points(splashParticleGeometry, splashParticleMaterial);
@@ -466,27 +729,103 @@ scene.add(marineSnowSystem);
 
 function updateMarineSnow() {
     const pos = marineSnowSystem.geometry.attributes.position.array as Float32Array;
-    const time = clock.getElapsedTime(); // Use global clock
+    const col = marineSnowSystem.geometry.attributes.color.array as Float32Array;
+    const time = clock.getElapsedTime(); 
     
+    const pPos = penguinBody.position;
+
     for(let i=0; i<marineSnowCount; i++) {
         const x = pos[i*3];
+        const y = pos[i*3+1];
         const z = pos[i*3+2];
         const depth = marineSnowDepths[i];
         
-        // Calculate Surface Height (Same as Water)
-        let surfaceY = waterLevel; // Base level (0)
-        // Note: Water Mesh is at y = waterLevel - waterDepth/2 = -10. 
-        // Top vertex local y is +10. So world Y is 0.
-        // We replicate the wave function:
+        // Wave bobbing
+        let surfaceY = waterLevel;
         surfaceY += Math.sin(x * 0.05 + time * 0.5) * 0.8;
         surfaceY += Math.cos(z * 0.07 + time * 0.4) * 0.6;
-        surfaceY += Math.sin((x + z) * 0.2 + time * 1.2) * 0.3;
-        surfaceY += Math.cos((x - z) * 0.5 + time * 2.0) * 0.1;
-        
-        // Bob with wave
         pos[i*3+1] = surfaceY - depth;
+        
+        // Bioluminescence
+        const dx = x - pPos.x;
+        const dy = y - pPos.y;
+        const dz = z - pPos.z;
+        const distSq = dx*dx + dy*dy + dz*dz;
+        
+        if (distSq < 25) { // Radius 5
+             // Glow bright cyan/white
+             col[i*3] = 0.8;
+             col[i*3+1] = 1.0;
+             col[i*3+2] = 1.0;
+        } else {
+             // Dim back to blue-ish randomly
+             // Optimization: Don't update if already dark? 
+             // Just set to a base cool color to be safe/simple
+             col[i*3] = 0.0;
+             col[i*3+1] = 0.2;
+             col[i*3+2] = 0.4;
+        }
     }
     marineSnowSystem.geometry.attributes.position.needsUpdate = true;
+} 
+
+function updateIcebergs() {
+    const time = clock.getElapsedTime();
+    const halfSize = terrainSize / 2 - 4; // Boundary buffer
+
+    icebergs.forEach(ice => {
+        // Sync visuals
+        ice.mesh.position.copy(ice.body.position as any);
+        ice.mesh.quaternion.copy(ice.body.quaternion as any);
+        
+        // Buoyancy
+        const waveY = getWaveHeight(ice.body.position.x, ice.body.position.z, time);
+        const depth = waveY - ice.body.position.y;
+        
+        if (depth > 0) {
+            ice.body.force.y += 30000 * depth - ice.body.velocity.y * 500;
+        }
+
+        // Stability (Keel effect)
+        const up = new CANNON.Vec3(0, 1, 0);
+        const localUp = new CANNON.Vec3(0, 1, 0);
+        ice.body.quaternion.vmult(localUp, localUp);
+        
+        // Torque to restore up
+        const axis = localUp.cross(up);
+        const angle = Math.asin(axis.length());
+        if (angle > 0.01) {
+            axis.normalize();
+            const torque = axis.scale(angle * 5000); // Strength
+            ice.body.torque.vadd(torque, ice.body.torque);
+        }
+        
+        // Containment
+        if (Math.abs(ice.body.position.x) > halfSize) {
+            ice.body.position.x = Math.sign(ice.body.position.x) * halfSize;
+            ice.body.velocity.x *= -0.5;
+        }
+        if (Math.abs(ice.body.position.z) > halfSize) {
+            ice.body.position.z = Math.sign(ice.body.position.z) * halfSize;
+            ice.body.velocity.z *= -0.5;
+        }
+    });
+}
+
+function updateShoreSplashes() {
+    const time = clock.getElapsedTime();
+    // Random check along shore
+    if (Math.random() > 0.9) {
+        const z = (Math.random() - 0.5) * terrainSize;
+        const x = (Math.random() * 10) - 5; // -5 to 5 (Transition zone)
+        const waveY = getWaveHeight(x, z, time);
+        const terrainY = getHeight(x, -z);
+        
+        // If wave hits terrain (approx)
+        if (Math.abs(waveY - terrainY) < 1.0 && waveY > waterLevel + 0.5) {
+             createSplash(new CANNON.Vec3(x, waveY, z), 5);
+        }
+    }
 }
 
 // ======== SQUID ========
@@ -750,7 +1089,6 @@ function clearEntities() {
 
     // Clear Squids
     squids.forEach(squid => {
-        if (squid.body) world.removeBody(squid.body);
         if (squid.visuals) scene.remove(squid.visuals);
     });
     squids.length = 0;
@@ -892,7 +1230,6 @@ document.addEventListener('keyup', (event) => {
 });
 
 // -- Touch Controls (Tap to Move) --
-let moveTarget: THREE.Vector3 | null = null;
 let touchSlideId = -1;
 
 document.addEventListener('touchstart', (e) => {
@@ -906,9 +1243,9 @@ document.addEventListener('touchstart', (e) => {
                  // Jump on touch start
                 if ((canJump && penguinBody.velocity.y < 5) || playerIsInWater) {
                     const tilt = new CANNON.Quaternion();
-                    tilt.setFromEuler(-0.5, 0, 0); 
+                    tilt.setFromEuler(-0.8, 0, 0); 
                     penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
-                    penguinBody.velocity.y = 12;
+                    penguinBody.velocity.y = isSprinting ? 35 : 18;
                     canJump = false;
                 }
                 isSliding = true; // Hold to slide
@@ -922,9 +1259,8 @@ document.addEventListener('touchstart', (e) => {
             mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
             raycaster.setFromCamera(mouse, camera);
             
-            const intersects = raycaster.intersectObject(terrainMesh);
+            const intersects = raycaster.intersectObject(topMesh);
             if (intersects.length > 0) {
-                moveTarget = intersects[0].point;
                 isSprinting = true; // Always sprint on touch? Or just walk. Let's sprint.
             }
         }
@@ -949,14 +1285,15 @@ let canJump = false;
 let playerIsInWater = false;
 
 function checkGround() {
-    // Direct height check is reliable for procedural terrain
-    // Note: Mesh is rotated -90 on X, so world Z corresponds to -local Y (which was passed to getHeight)
-    const terrainHeight = getHeight(penguinBody.position.x, -penguinBody.position.z);
-    const distanceToGround = penguinBody.position.y - terrainHeight;
+    const start = penguinBody.position;
+    // Cast down slightly more than radius
+    const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 0.8), start.z);
     
-    // Bottom of penguin is at y - penguinRadius
-    // Allow jump if within 0.8 units of ground (very permissive)
-    if (distanceToGround < penguinRadius + 0.8) {
+    const result = new CANNON.RaycastResult();
+    // Default collision filter is fine, we want to hit anything (terrain or icebergs)
+    world.raycastClosest(start, end, {}, result);
+    
+    if (result.hasHit) {
         canJump = true;
     } else {
         canJump = false;
@@ -984,7 +1321,7 @@ function updatePenguinMovement() {
     // Eating Squids/Fish
     for (let i = squids.length - 1; i >= 0; i--) {
         const squid = squids[i];
-        if (penguinBody.position.distanceTo(squid.position) < 1.5) {
+        if (penguinBody.position.distanceTo(squid.position as any) < 1.5) {
             scene.remove(squid.visuals);
             squids.splice(i, 1);
             hunger = Math.min(100, hunger + 20);
@@ -1212,11 +1549,20 @@ bloodParticles.frustumCulled = false;
 scene.add(bloodParticles);
 
 function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood: boolean = false) {
+    const time = clock.getElapsedTime();
+    
+    // Update Shader Ripple
+    if (topMaterial.userData.shader) {
+        topMaterial.userData.shader.uniforms.uRipple.value.set(position.x, position.z, time);
+    }
+
     const scale = Math.min(3, impactVelocity / 8); 
     const particleCount = Math.max(5, Math.floor(20 * scale));
     
     // Select system
     let positions, velocities, lifespans, nextIdx, maxCount, geo;
+    let opacities: Float32Array | null = null;
+
     if (isBlood) {
         positions = bloodParticlePositions;
         velocities = bloodParticleVelocities;
@@ -1228,6 +1574,7 @@ function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood
         positions = splashParticlePositions;
         velocities = splashParticleVelocities;
         lifespans = splashParticleLifespans;
+        opacities = splashParticleOpacities;
         nextIdx = nextSplashParticle;
         maxCount = splashParticleCount;
         geo = splashParticleGeometry;
@@ -1247,6 +1594,8 @@ function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood
             (Math.random() - 0.5) * 0.2 * scale
         );
         lifespans[particleIndex] = (Math.random() * 30 + 30) * scale;
+        if (opacities) opacities[particleIndex] = 1.0;
+
         nextIdx = (nextIdx + 1) % maxCount;
     }
     
@@ -1254,11 +1603,14 @@ function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood
     else nextSplashParticle = nextIdx;
     
     geo.attributes.position.needsUpdate = true;
+    if (!isBlood) geo.attributes.opacity.needsUpdate = true;
 }
 
 function updateSplashParticles() {
     // Water
     let positions = splashParticles.geometry.attributes.position.array as Float32Array;
+    let opacities = splashParticles.geometry.attributes.opacity.array as Float32Array;
+
     for (let i = 0; i < splashParticleCount; i++) {
         if (splashParticleLifespans[i] > 0) {
             splashParticleLifespans[i]--;
@@ -1266,11 +1618,20 @@ function updateSplashParticles() {
             positions[i * 3 + 1] += splashParticleVelocities[i].y;
             positions[i * 3 + 2] += splashParticleVelocities[i].z;
             splashParticleVelocities[i].y -= 0.01; 
+            
+            // Fade out
+            if (splashParticleLifespans[i] < 20) {
+                 opacities[i] = splashParticleLifespans[i] / 20;
+            } else {
+                 opacities[i] = 1.0;
+            }
         } else {
             positions[i * 3 + 1] = -100;
+            opacities[i] = 0;
         }
     }
     splashParticles.geometry.attributes.position.needsUpdate = true;
+    splashParticles.geometry.attributes.opacity.needsUpdate = true;
 
     // Blood
     positions = bloodParticles.geometry.attributes.position.array as Float32Array;
@@ -1294,6 +1655,17 @@ function updateNpcs() {
     const separationDist = 1.5;
 
     npcPenguins.forEach((npc, index) => {
+        // --- BOUNDARY CHECK ---
+        const halfSize = terrainSize / 2 - 1.0; 
+        if (Math.abs(npc.body.position.x) > halfSize) {
+            npc.body.position.x = Math.sign(npc.body.position.x) * halfSize;
+            npc.body.velocity.x *= -0.5; // Bounce back
+        }
+        if (Math.abs(npc.body.position.z) > halfSize) {
+            npc.body.position.z = Math.sign(npc.body.position.z) * halfSize;
+            npc.body.velocity.z *= -0.5;
+        }
+
         // Water splash check
         const wasInWater = npc.isInWater;
         npc.isInWater = npc.body.position.y < waterLevel + penguinRadius;
@@ -1329,7 +1701,7 @@ function updateNpcs() {
         // Eating Squids
         for (let i = squids.length - 1; i >= 0; i--) {
             const squid = squids[i];
-            if (npc.body.position.distanceTo(squid.position) < 1.5) {
+            if (npc.body.position.distanceTo(squid.position as any) < 1.5) {
                 scene.remove(squid.visuals);
                 squids.splice(i, 1);
             }
@@ -1478,29 +1850,32 @@ function animate() {
     requestAnimationFrame(animate);
     const deltaTime = clock.getDelta();
     const elapsedTime = clock.getElapsedTime();
+    
+    // Update Caustics (Projected)
+    if (topMaterial.userData.shader) {
+        topMaterial.userData.shader.uniforms.uTime.value = elapsedTime;
+    }
+    
     world.step(1 / 60, deltaTime, 3);
     
-    // Water Waves (Box Geometry - Fixed)
+    // Update Shader Time
+    terrainUniforms.uTime.value = elapsedTime;
+    
+    // Water Waves (Gerstner Field)
     const positions = waterMesh.geometry.attributes.position.array as Float32Array;
+    const basePositions = waterMesh.userData.basePositions as Float32Array;
     const topY = waterDepth / 2; // 10
     
     for (let i = 0; i < positions.length; i += 3) {
-        // Only animate vertices near the top
-        // Use a threshold because previous frames might have moved them slightly down
-        if (positions[i + 1] > topY - 2.0) { 
-            const x = positions[i];
-            const z = positions[i + 2];
+        // Only animate vertices on the top surface
+        if (basePositions[i + 1] > topY - 0.1) { 
+            const bx = basePositions[i];
+            const bz = basePositions[i + 2];
             
-            let waveHeight = 0;
-            // Wave 1 (Swell)
-            waveHeight += Math.sin(x * 0.1 + elapsedTime * 0.5) * 0.5;
-            // Wave 2 (Cross)
-            waveHeight += Math.cos(z * 0.15 + elapsedTime * 0.4) * 0.4;
-            // Wave 3 (Chop)
-            waveHeight += Math.sin((x + z) * 0.3 + elapsedTime * 1.5) * 0.2;
-            
-            // Set absolute position (Fixes accumulation bug)
-            positions[i + 1] = topY + waveHeight;
+            const gPos = getGerstnerPosition(bx, bz, elapsedTime);
+            positions[i] = gPos.x;
+            positions[i + 1] = topY + (gPos.y - waterLevel);
+            positions[i + 2] = gPos.z;
         }
     }
     waterMesh.geometry.attributes.position.needsUpdate = true;
@@ -1513,8 +1888,11 @@ function animate() {
     updateParticles();
     updateSplashParticles();
     updateMarineSnow();
+    updateIcebergs();
+    updateShoreSplashes();
     updateNpcs();
     updateSquids();
+    updateIcebergs();
     
     // Update animated objects (door)
     penguinGroup.position.x = penguinBody.position.x;
