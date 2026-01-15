@@ -133,7 +133,7 @@ document.addEventListener('touchmove', (e) => {
     }
 
     joystickKnob.style.transform = `translate(${joystickState.knobX}px, ${joystickState.knobY}px)`;
-    joystickState.vector.set(joystickState.knobX / maxDist, -joystickState.knobY / maxDist);
+    joystickState.vector.set(joystickState.knobX / maxDist, joystickState.knobY / maxDist);
 
     if (joystickState.vector.length() > 0.7) {
         isSprinting = true;
@@ -508,14 +508,42 @@ function createIcebergs() {
         group.receiveShadow = true;
         scene.add(group);
         
-        // Physics (10-sided Cylinder approximation)
-        // Cannon Cylinder is Z-up. We need to rotate it to be Y-up.
-        const shapePhys = new CANNON.Cylinder(radius * 0.8, radius * 0.8, 1.5, 10);
-        const q = new CANNON.Quaternion();
-        q.setFromEuler(-Math.PI / 2, 0, 0);
+        // Physics: Build a ConvexPolyhedron from the 2D shape to match the top surface.
+        const cannonVertices: CANNON.Vec3[] = [];
+        const polygonPoints: {x: number, y: number}[] = [];
+        const height = 1.5;
+
+        for (let j = 0; j < numPoints; j++) {
+            const angle = (j / numPoints) * Math.PI * 2;
+            const r = radius * (0.6 + Math.random() * 0.8); // High variance
+            const px = Math.cos(angle) * r;
+            const py = Math.sin(angle) * r;
+            polygonPoints.push({ x: px, y: py });
+        }
         
+        // Create 3D vertices for the prism
+        for (const p of polygonPoints) {
+            cannonVertices.push(new CANNON.Vec3(p.x, height / 2, p.y));
+        }
+        for (const p of polygonPoints) {
+            cannonVertices.push(new CANNON.Vec3(p.x, -height / 2, p.y));
+        }
+
+        const faces: number[][] = [];
+        // Top face
+        faces.push(Array.from({length: numPoints}, (_, i) => i).reverse());
+        // Bottom face
+        faces.push(Array.from({length: numPoints}, (_, i) => i + numPoints));
+        // Side faces
+        for (let i = 0; i < numPoints; i++) {
+            const next = (i + 1) % numPoints;
+            faces.push([i, next, next + numPoints, i + numPoints]);
+        }
+        
+        const shapePhys = new CANNON.ConvexPolyhedron({ vertices: cannonVertices, faces });
+
         const body = new CANNON.Body({ mass: 2000, material: iceMaterial }); 
-        body.addShape(shapePhys, new CANNON.Vec3(0, 0, 0), q);
+        body.addShape(shapePhys, new CANNON.Vec3(0, 0.5, 0)); // Offset to match visual geometry
         body.linearDamping = 0.9;
         body.angularDamping = 0.9;
         body.position.set(x, waterLevel, z);
@@ -799,11 +827,9 @@ const surfaceSnowMaterial = new THREE.ShaderMaterial({
             gl_PointSize = 4.0 * ( 30.0 / -mvPosition.z ); 
             gl_Position = projectionMatrix * mvPosition;
 
-            vec3 viewDir = normalize(cameraPosition - position);
-            float alignment = dot(normal, viewDir);
-
-            // Make sparkle more visible with a wider threshold
-            vAlpha = pow(max(0.0, alignment), 20.0); // Less restrictive specular highlight
+            // Make sparkle more visible with a wider threshold and a base visibility
+            float alignment = pow(max(0.0, dot(normal, viewDir)), 20.0);
+            vAlpha = 0.2 + alignment * 0.8; // Base alpha of 0.2, sparkles up to 1.0
         }
     `,
     fragmentShader: `
@@ -824,6 +850,40 @@ const surfaceSnowMaterial = new THREE.ShaderMaterial({
 const surfaceSnowSystem = new THREE.Points(surfaceSnowGeometry, surfaceSnowMaterial);
 surfaceSnowSystem.frustumCulled = false;
 scene.add(surfaceSnowSystem);
+
+let snowSparklesInitialized = false;
+function createSurfaceSnow() {
+    const positions = surfaceSnowSystem.geometry.attributes.position.array as Float32Array;
+    const normals = surfaceSnowSystem.geometry.attributes.normal.array as Float32Array;
+
+    for (let i = 0; i < surfaceSnowCount; i++) {
+        let x, z, y;
+        let attempts = 0;
+        do {
+            x = (Math.random() - 0.5) * terrainSize;
+            z = (Math.random() - 0.5) * terrainSize;
+            y = getHeight(x, -z);
+            attempts++;
+        } while (y <= waterLevel + 0.5 && attempts < 100);
+
+        if (attempts < 100) {
+            positions[i * 3] = x;
+            positions[i * 3 + 1] = y + 0.05;
+            positions[i * 3 + 2] = z;
+
+            const normal = new THREE.Vector3(Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1).normalize();
+            normals[i * 3] = normal.x;
+            normals[i * 3 + 1] = normal.y;
+            normals[i * 3 + 2] = normal.z;
+        } else {
+            // Hide particle if no valid spot found
+            positions[i * 3 + 1] = -1000;
+        }
+    }
+    surfaceSnowSystem.geometry.attributes.position.needsUpdate = true;
+    surfaceSnowSystem.geometry.attributes.normal.needsUpdate = true;
+    snowSparklesInitialized = true;
+}
 
 // ======== MARINE SNOW ========
 const splashParticleCount = 100;
@@ -1437,62 +1497,6 @@ document.addEventListener('keyup', (event) => {
 // -- Touch Controls (New)
 
 // -- Touch Controls (New) --
-let lastTapTime = 0;
-let touchMoveTarget: THREE.Vector3 | null = null;
-let touchCameraActive = false;
-
-document.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    controls.enabled = (e.touches.length > 1);
-    
-    if (e.touches.length === 1) {
-        const t = e.touches[0];
-        const now = Date.now();
-        if (now - lastTapTime < 300) { // Double tap
-            isSprinting = true;
-        } else {
-            isSprinting = false;
-        }
-        lastTapTime = now;
-
-        // Raycast to find target for movement
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-        mouse.x = (t.clientX / window.innerWidth) * 2 - 1;
-        mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
-        
-        const intersects = raycaster.intersectObject(topMesh);
-        if (intersects.length > 0) {
-            touchMoveTarget = intersects[0].point;
-        }
-    }
-}, { passive: false });
-
-document.addEventListener('touchmove', (e) => {
-    if (e.touches.length === 1 && touchMoveTarget) {
-        // Update movement target if dragging
-        const t = e.touches[0];
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-        mouse.x = (t.clientX / window.innerWidth) * 2 - 1;
-        mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
-        
-        const intersects = raycaster.intersectObject(topMesh);
-        if (intersects.length > 0) {
-            touchMoveTarget = intersects[0].point;
-        }
-    }
-});
-
-document.addEventListener('touchend', (e) => {
-    if (e.touches.length === 0) {
-        touchMoveTarget = null;
-        isSprinting = false;
-        controls.enabled = true;
-    }
-});
 
 const moveVelocity = 5;
 const sprintMoveVelocity = 22;
@@ -1626,19 +1630,11 @@ function updatePenguinMovement() {
     const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
     const vel = new CANNON.Vec3(0, 0, 0);
 
-    // Joystick has priority, then touch, then keyboard
+    // Joystick has priority, then keyboard
     if (joystickState.vector.lengthSq() > 0) {
         const joystickVec = joystickState.vector;
         vel.x = (rightDir.x * joystickVec.x) + (camDir.x * joystickVec.y);
         vel.z = (rightDir.z * joystickVec.x) + (camDir.z * joystickVec.y);
-    } else if (touchMoveTarget) {
-        const direction = new THREE.Vector3().subVectors(touchMoveTarget, penguinBody.position as any);
-        direction.y = 0;
-        if (direction.length() > 0.5) { // Stop if close
-             direction.normalize();
-             vel.x = direction.x;
-             vel.z = direction.z;
-        }
     } else {
         if (input.f) { vel.x -= camDir.x; vel.z -= camDir.z; }
         if (input.b) { vel.x += camDir.x; vel.z += camDir.z; }
@@ -2091,6 +2087,11 @@ const slidingQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-8
 
 function animate() {
     requestAnimationFrame(animate);
+
+    if (!snowSparklesInitialized) {
+        createSurfaceSnow();
+    }
+
     const deltaTime = clock.getDelta();
     const elapsedTime = clock.getElapsedTime();
     
