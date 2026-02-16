@@ -18,6 +18,17 @@ hudDiv.style.fontFamily = 'monospace';
 hudDiv.style.borderRadius = '5px';
 document.body.appendChild(hudDiv);
 
+const buildNumDiv = document.createElement('div');
+buildNumDiv.id = 'build-num';
+buildNumDiv.style.position = 'absolute';
+buildNumDiv.style.top = '50px';
+buildNumDiv.style.right = '10px';
+buildNumDiv.style.color = 'white';
+buildNumDiv.style.fontFamily = 'monospace';
+buildNumDiv.style.fontSize = '14px';
+buildNumDiv.innerHTML = 'Build: 36';
+document.body.appendChild(buildNumDiv);
+
 let hunger = 100;
 let isDead = false;
 
@@ -44,11 +55,26 @@ statsDiv.style.fontSize = '20px';
 statsDiv.innerHTML = 'Energy: 100%';
 document.body.appendChild(statsDiv);
 
+const cameraDebugDiv = document.createElement('div');
+cameraDebugDiv.id = 'camera-debug';
+cameraDebugDiv.style.position = 'absolute';
+cameraDebugDiv.style.top = '80px';
+cameraDebugDiv.style.left = '10px';
+cameraDebugDiv.style.color = 'white';
+cameraDebugDiv.style.fontFamily = 'monospace';
+cameraDebugDiv.style.fontSize = '14px';
+document.body.appendChild(cameraDebugDiv);
+
+let cameraYOffset = 0;
+
+
 // ======== CONTROLS ========
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.minDistance = 5;
 controls.maxDistance = 100;
+controls.enableRotate = true; // Ensure rotate is enabled (for 2-finger touch)
+
 
 // ======== LIGHTING ========
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
@@ -66,12 +92,83 @@ world.broadphase = new CANNON.SAPBroadphase(world);
 const groundMaterial = new CANNON.Material('ground');
 const penguinMaterial = new CANNON.Material('penguin');
 const penguinSlidingMaterial = new CANNON.Material('penguinSliding');
+const iceMaterial = new CANNON.Material('ice');
 
-const groundPenguinContact = new CANNON.ContactMaterial(groundMaterial, penguinMaterial, { friction: 0.2, restitution: 0.1 });
+const groundPenguinContact = new CANNON.ContactMaterial(groundMaterial, penguinMaterial, { friction: 0.9, restitution: 0.1 });
 const groundPenguinSlidingContact = new CANNON.ContactMaterial(groundMaterial, penguinSlidingMaterial, { friction: 0.01, restitution: 0.1 });
+const icePenguinContact = new CANNON.ContactMaterial(iceMaterial, penguinMaterial, { friction: 0.9, restitution: 0.1 });
 
 world.addContactMaterial(groundPenguinContact);
 world.addContactMaterial(groundPenguinSlidingContact);
+world.addContactMaterial(icePenguinContact);
+
+// ======== SOUNDS ========
+class SoundManager {
+    private sounds: { [key: string]: HTMLAudioElement } = {};
+    private isInitialized = false;
+    private globalVolume = 0.7; // Set a default volume
+
+    constructor() {
+        this.load('gulp', 'https://actions.google.com/sounds/v1/human_actions/gulp.ogg');
+        this.load('splash', 'https://actions.google.com/sounds/v1/water/splash.ogg');
+        this.load('shuffle', 'https://actions.google.com/sounds/v1/impacts/footsteps_snow.ogg');
+        this.load('debug', 'https://actions.google.com/sounds/v1/alarms/alarm_clock.ogg'); // Loud debug sound
+    }
+
+    private load(name: string, src: string) {
+        this.sounds[name] = new Audio(src);
+        this.sounds[name].volume = this.globalVolume;
+        this.sounds[name].addEventListener('error', (e) => {
+            console.error(`Error loading sound '${name}' from src '${src}':`, e);
+        });
+    }
+
+    init() {
+        if (this.isInitialized) return;
+        this.isInitialized = true;
+        console.log("SoundManager Initialized.");
+    }
+
+    play(name: string) {
+        if (!this.isInitialized) {
+            console.log(`SoundManager not initialized. Cannot play '${name}'.`);
+            return;
+        }
+        if (this.sounds[name]) {
+            console.log(`Playing sound: ${name} at volume ${this.sounds[name].volume}`);
+            this.sounds[name].currentTime = 0;
+            this.sounds[name].play().catch(error => console.error(`Error playing sound ${name}:`, error));
+        } else {
+            console.warn(`Sound not found: ${name}`);
+        }
+    }
+}
+const soundManager = new SoundManager();
+
+// ======== START OVERLAY ========
+const startOverlay = document.createElement('div');
+startOverlay.id = 'start-overlay';
+startOverlay.style.position = 'absolute';
+startOverlay.style.top = '0';
+startOverlay.style.left = '0';
+startOverlay.style.width = '100%';
+startOverlay.style.height = '100%';
+startOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+startOverlay.style.color = 'white';
+startOverlay.style.display = 'flex';
+startOverlay.style.justifyContent = 'center';
+startOverlay.style.alignItems = 'center';
+startOverlay.style.fontSize = '32px';
+startOverlay.style.fontFamily = 'Arial, sans-serif';
+startOverlay.style.cursor = 'pointer';
+startOverlay.innerHTML = '<div>Click to Start</div>';
+document.body.appendChild(startOverlay);
+
+startOverlay.addEventListener('click', () => {
+    soundManager.init();
+    startOverlay.style.display = 'none';
+    animate(); // Start the animation loop only after user interaction
+}, { once: true });
 
 // ======== PROCEDURAL TERRAIN ========
 const noise2D = createNoise2D();
@@ -131,7 +228,7 @@ function getHeight(x: number, z: number): number {
 
 // ======== GERSTNER WAVES ========
 const waveCount = 10;
-const shoreDir = new THREE.Vector2(0, 1).normalize(); // Toward +Z
+const shoreDir = new THREE.Vector2(1, 0).normalize(); // Toward +X
 const spread = (35 * Math.PI) / 180;
 const waveK = [0.55, 0.78, 1.05, 1.32, 1.62, 1.95, 2.30, 2.75, 3.15, 3.70];
 const waveAmp = [0.22, 0.15, 0.11, 0.085, 0.065, 0.050, 0.038, 0.030, 0.024, 0.020];
@@ -139,14 +236,9 @@ const waveSpeed = [1.05, 1.18, 1.30, 1.42, 1.55, 1.70, 1.86, 2.02, 2.18, 2.35];
 const waveDirs: THREE.Vector2[] = [];
 
 for (let i = 0; i < waveCount; i++) {
-    if (i < 7) {
-        const angle = (Math.random() - 0.5) * 2 * spread;
-        const dir = shoreDir.clone().rotateAround(new THREE.Vector2(0, 0), angle);
-        waveDirs.push(dir);
-    } else {
-        const angle = Math.random() * Math.PI * 2;
-        waveDirs.push(new THREE.Vector2(Math.cos(angle), Math.sin(angle)));
-    }
+    const angle = (Math.random() - 0.5) * spread * 2; // Full spread
+    const dir = shoreDir.clone().rotateAround(new THREE.Vector2(0, 0), angle);
+    waveDirs.push(dir);
 }
 
 function getWaveHeight(x: number, z: number, time: number): number {
@@ -265,7 +357,34 @@ skirtGeometry.setAttribute('position', new THREE.Float32BufferAttribute(skirtVer
 skirtGeometry.setIndex(skirtIndices);
 skirtGeometry.computeVertexNormals();
 
-const skirtMaterial = new THREE.MeshLambertMaterial({ color: 0x505060, side: THREE.DoubleSide });
+const skirtMaterial = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    uniforms: {
+        uTopColor: { value: new THREE.Color(0xbac8de) }, // Lighter blue-grey
+        uBottomColor: { value: new THREE.Color(0x5a6a7f) }, // Lighter dark blue-grey
+        uMinY: { value: -50.0 }, // Corresponds to skirtDepth
+        uMaxY: { value: 15.0 } // Approx max terrain height
+    },
+    vertexShader: `
+        varying float vWorldY;
+        void main() {
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldY = worldPosition.y;
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    `,
+    fragmentShader: `
+        uniform vec3 uTopColor;
+        uniform vec3 uBottomColor;
+        uniform float uMinY;
+        uniform float uMaxY;
+        varying float vWorldY;
+        void main() {
+            float h = smoothstep(uMinY, uMaxY, vWorldY);
+            gl_FragColor = vec4(mix(uBottomColor, uTopColor, h), 1.0);
+        }
+    `
+});
 const skirtMesh = new THREE.Mesh(skirtGeometry, skirtMaterial);
 topMesh.add(skirtMesh); 
 
@@ -278,16 +397,18 @@ topMesh.add(bottomMesh);
 
 const trimeshShape = new CANNON.Trimesh(Array.from(vertices), Array.from(terrainGeometry.index!.array));
 const terrainBody = new CANNON.Body({ mass: 0, material: groundMaterial, shape: trimeshShape });
-// Add a thick base box to prevent tunneling through the mesh
-const baseShape = new CANNON.Box(new CANNON.Vec3(terrainSize/2, 2, terrainSize/2));
-terrainBody.addShape(baseShape, new CANNON.Vec3(0, -17, 0)); // Solid floor at bottom
+// Add a thick base box to prevent tunneling through the mesh (Floor)
+// Terrain is rotated -90 X. Local Z is World Y. Local Y is World -Z.
+// We want a floor at World Y = -20.
+const baseShape = new CANNON.Box(new CANNON.Vec3(terrainSize/2, terrainSize/2, 2)); 
+terrainBody.addShape(baseShape, new CANNON.Vec3(0, 0, -20)); 
 terrainBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 world.addBody(terrainBody);
 
 // ======== CATCH PLANE ========
 
 // ======== WATER ========
-const waterGeometry = new THREE.BoxGeometry(terrainSize - 0.2, waterDepth, terrainSize - 0.2, 64, 1, 64);
+const waterGeometry = new THREE.BoxGeometry(terrainSize - 2, 40, terrainSize - 2, 64, 1, 64);
 
 const sideMat = new THREE.MeshStandardMaterial({
     color: 0x44aaff,
@@ -328,68 +449,136 @@ scene.add(waterMesh);
 const icebergs: { body: CANNON.Body, mesh: THREE.Group }[] = [];
 
 function createIcebergs() {
-    const iceMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.1 });
-    
-    for (let i = 0; i < 6; i++) {
-        const x = 15 + Math.random() * 40; 
-        const z = (Math.random() - 0.5) * 60;
+    const iceMat = new THREE.ShaderMaterial({
+        lights: true,
+        uniforms: THREE.UniformsUtils.merge([
+            THREE.UniformsLib.lights,
+            {
+                uBaseColor: { value: new THREE.Color(0.9, 0.95, 1.0) },
+                uSubtleColor: { value: new THREE.Color(0.7, 0.8, 1.0) }
+            }
+        ]),
+        vertexShader: `
+            varying vec3 vNormal;
+            varying vec3 vWorldPosition;
+            void main() {
+                vNormal = normalize(normalMatrix * normal);
+                vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                vWorldPosition = worldPosition.xyz;
+                gl_Position = projectionMatrix * viewMatrix * worldPosition;
+            }
+        `,
+        fragmentShader: `
+            #include <common>
+            #include <lights_pars_begin>
+            varying vec3 vNormal;
+            varying vec3 vWorldPosition;
+            uniform vec3 uBaseColor;
+            uniform vec3 uSubtleColor;
+
+            void main() {
+                vec3 N = normalize(vNormal);
+                float light = dot(N, directionalLights[0].direction);
+                light = floor(light * 5.0) / 5.0; 
+                vec3 color = mix(uSubtleColor, uBaseColor, smoothstep(0.0, 0.8, light));
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `
+    });
+    const createdPositions: CANNON.Vec3[] = [];
+
+    // Generate 8 distinct icebergs
+    for (let i = 0; i < 8; i++) {
+        const isBigOne = i < 2; // Two big ones
+        const baseRadius = isBigOne ? 6 + Math.random() * 4 : 2 + Math.random() * 3;
+        const height = isBigOne ? 2.5 : 1.5;
+        const coneHeight = isBigOne ? 5 : 3;
         
-        // 10-sided Irregular Polygon
-        const shape = new THREE.Shape();
-        const numPoints = 10;
-        const radius = 3 + Math.random() * 3;
+        let position: CANNON.Vec3;
+        let tooClose: boolean;
+        do {
+            tooClose = false;
+            const x = 10 + Math.random() * 40; 
+            const z = (Math.random() - 0.5) * 60;
+            // Spawn partially submerged for stability
+            position = new CANNON.Vec3(x, waterLevel - 0.5, z); 
+            for (const p of createdPositions) {
+                if (p.distanceTo(position) < baseRadius + 6) { 
+                    tooClose = true;
+                    break;
+                }
+            }
+        } while (tooClose);
+        createdPositions.push(position);
+
+        // Generate Irregular Polygon
+        const numPoints = 12 + Math.floor(Math.random() * 6);
+        const vertices: number[] = [];
+        const indices: number[] = [];
+        const topPoints: THREE.Vector3[] = [];
         
         for (let j = 0; j < numPoints; j++) {
             const angle = (j / numPoints) * Math.PI * 2;
-            const r = radius * (0.6 + Math.random() * 0.8); // High variance
-            const px = Math.cos(angle) * r;
-            const py = Math.sin(angle) * r;
-            if (j === 0) shape.moveTo(px, py);
-            else shape.lineTo(px, py);
+            // Vary radius with noise-like randomness
+            const radius = baseRadius * (0.6 + Math.random() * 0.6); 
+            const px = Math.cos(angle) * radius;
+            const pz = Math.sin(angle) * radius;
+            topPoints.push(new THREE.Vector3(px, height / 2, pz));
+        }
+
+        // Build Geometry (Top Surface, Bottom Surface, Tip)
+        for (const p of topPoints) vertices.push(p.x, p.y, p.z);
+        for (const p of topPoints) vertices.push(p.x, -p.y, p.z);
+        const coneTipIndex = vertices.length / 3;
+        vertices.push(0, -height / 2 - coneHeight, 0);
+
+        // Indices
+        for (let j = 1; j < numPoints - 1; j++) indices.push(0, j + 1, j); // Top Cap
+        for (let j = 0; j < numPoints; j++) { // Sides
+            const next = (j + 1) % numPoints;
+            indices.push(j, j + numPoints, next);
+            indices.push(j + numPoints, next + numPoints, next);
+        }
+        for (let j = 0; j < numPoints; j++) { // Bottom Cone
+            const next = (j + 1) % numPoints;
+            indices.push(j + numPoints, coneTipIndex, next + numPoints);
         }
         
-        const extrudeSettings = {
-            steps: 1,
-            depth: 1.5, 
-            bevelEnabled: true,
-            bevelThickness: 0.2,
-            bevelSize: 0.2,
-            bevelSegments: 1
-        };
+        const finalGeom = new THREE.BufferGeometry();
+        finalGeom.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        finalGeom.setIndex(indices);
+        finalGeom.computeVertexNormals();
         
-        const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-        geom.rotateX(Math.PI / 2); 
-        geom.translate(0, 0.5, 0); 
-        
-        const mesh = new THREE.Mesh(geom, iceMat);
-        
-        // Jagged bottom (Cone with same segment count)
-        const bottomGeom = new THREE.ConeGeometry(radius * 0.8, 4, numPoints);
-        bottomGeom.rotateX(Math.PI); 
-        const bottomMesh = new THREE.Mesh(bottomGeom, iceMat);
-        bottomMesh.position.y = -1.5;
-        
+        // Visual Mesh
+        const mesh = new THREE.Mesh(finalGeom, iceMat);
         const group = new THREE.Group();
         group.add(mesh);
-        group.add(bottomMesh);
-        group.position.set(x, waterLevel, z);
+        group.position.copy(position as any);
         group.castShadow = true;
         group.receiveShadow = true;
         scene.add(group);
         
-        // Physics (10-sided Cylinder approximation)
-        // Cannon Cylinder is Z-up. We need to rotate it to be Y-up.
-        const shapePhys = new CANNON.Cylinder(radius * 0.8, radius * 0.8, 1.5, 10);
-        const q = new CANNON.Quaternion();
-        q.setFromEuler(-Math.PI / 2, 0, 0);
+        // Physics Body (Trimesh)
+        const shapePhys = threeMeshToCannonTrimesh(mesh);
+        const body = new CANNON.Body({ 
+            mass: isBigOne ? 5000 : 1500, 
+            material: iceMaterial,
+            linearDamping: 0.95, // High damping for stability
+            angularDamping: 0.95
+        });
+        body.addShape(shapePhys);
+        body.position.copy(position);
         
-        const body = new CANNON.Body({ mass: 2000 }); 
-        body.addShape(shapePhys, new CANNON.Vec3(0, 0, 0), q);
-        body.linearDamping = 0.9;
-        body.angularDamping = 0.9;
-        body.position.set(x, waterLevel, z);
+        // Keel is implicit in the shape (cone bottom), but we add mass below
+        // Center of mass is 0,0,0 (top surface center approx).
+        // The heavy cone tip is geometry only.
+        // We can offset the shape UP so COM is lower?
+        // Actually, Trimesh physics respects the geometry.
+        // If we want it bottom heavy, we can add a heavy sphere at the tip.
+        const keel = new CANNON.Sphere(1.0);
+        body.addShape(keel, new CANNON.Vec3(0, -coneHeight, 0));
+
         world.addBody(body);
-        
         icebergs.push({ body, mesh: group });
     }
 }
@@ -399,7 +588,8 @@ createIcebergs();
 // Inject into Terrain Material
 topMaterial.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
-    shader.uniforms.uRipple = { value: new THREE.Vector3(0, 0, -100) }; // x, z, startTime
+    shader.uniforms.uRipple1 = { value: new THREE.Vector3(0, 0, -100) }; 
+    shader.uniforms.uRipple2 = { value: new THREE.Vector3(0, 0, -100) };
     topMaterial.userData.shader = shader;
 
     shader.vertexShader = `
@@ -415,28 +605,31 @@ topMaterial.onBeforeCompile = (shader) => {
 
     shader.fragmentShader = `
         uniform float uTime;
-        uniform vec3 uRipple;
+        uniform vec3 uRipple1;
+        uniform vec3 uRipple2;
         varying vec3 vWorldPosition;
         
-        // Match Water Waves + Ripple
+        // Match Water Waves
         float getCaustic(vec2 p, float t) {
             float v = 0.0;
             // Higher frequency, lower contrast
             v += sin(p.x * 0.3 + t * 0.8);
             v += cos(p.y * 0.35 + t * 0.6); 
             v += sin((p.x + p.y) * 0.8 + t * 1.5);
-            
-            // Interactive Ripple
-            float d = distance(p, uRipple.xy);
-            float rt = t - uRipple.z; // Time since splash
+            return v;
+        }
+        
+        float getRipple(vec2 p, float t, vec3 ripple) {
+            float d = distance(p, ripple.xy);
+            float rt = t - ripple.z; 
             if (rt > 0.0 && rt < 5.0) {
                  float wave = sin(d * 2.0 - rt * 5.0);
-                 float mask = smoothstep(5.0, 0.0, d - rt * 2.0); // Ring mask
-                 float decay = exp(-rt * 0.5);
-                 v += wave * mask * decay * 2.0;
+                 float mask = smoothstep(5.0, 0.0, d - rt * 2.0); 
+                 float timeFade = 1.0 - smoothstep(3.0, 5.0, rt); 
+                 float decay = exp(-rt * 0.5) * timeFade;
+                 return wave * mask * decay * 0.5;
             }
-            
-            return v;
+            return 0.0;
         }
 
         // Helper Noise for Glitter/Cracks
@@ -476,18 +669,8 @@ topMaterial.onBeforeCompile = (shader) => {
             float shoreMask = smoothstep(5.0, 0.0, depth);
             float shoreRipple = pow(0.5 + 0.5 * shoreWave, 4.0) * shoreMask * 0.3;
             
-            // 3. Interactive Ripples (Smoother fade)
-            float interact = 0.0;
-            float d = distance(vWorldPosition.xz, uRipple.xy);
-            float rt = uTime - uRipple.z; 
-            if (rt > 0.0 && rt < 5.0) {
-                 float wave = sin(d * 2.0 - rt * 5.0);
-                 float mask = smoothstep(5.0, 0.0, d - rt * 2.0); 
-                 // Smooth fade out at end
-                 float timeFade = 1.0 - smoothstep(3.0, 5.0, rt); 
-                 float decay = exp(-rt * 0.5) * timeFade;
-                 interact = wave * mask * decay * 0.5;
-            }
+            // 3. Interactive Ripples (Dual)
+            float interact = getRipple(vWorldPosition.xz, uTime, uRipple1) + getRipple(vWorldPosition.xz, uTime, uRipple2);
 
             float totalLight = causticIntensity + shoreRipple + interact;
             vec3 deepBlue = vec3(0.0, 0.05, 0.2);
@@ -500,27 +683,26 @@ topMaterial.onBeforeCompile = (shader) => {
         } else {
             // --- SNOW TERRAIN (Above Water) ---
             vec2 uv = vWorldPosition.xz;
+            vec3 worldNormal = normalize(vNormal);
+
+            // Blend based on steepness
+            float slope = 1.0 - worldNormal.y;
             
-            // 1. Icy Cracks
-            // Use sine interference pattern for cracks
-            float crackNoise = sin(uv.x * 0.5) * cos(uv.y * 0.5) * sin((uv.x+uv.y)*0.2);
-            // Thin lines where noise is near 0
-            float crack = 1.0 - smoothstep(0.0, 0.05, abs(crackNoise)); 
-            
-            // 2. Snow Glitter
-            // View dependent sparkle? Approximate with noise + camera dist or just noise
-            float sparkle = snowRand(uv * 100.0); // High freq noise
-            // Make it sparse
-            sparkle = step(0.98, sparkle); 
-            
-            vec3 snowColor = vec3(0.95, 0.98, 1.0); // Soft blue-white
-            vec3 iceColor = vec3(0.7, 0.8, 1.0); // Blue crack
-            
-            vec3 finalSnow = mix(snowColor, iceColor, crack * 0.5);
-            finalSnow += vec3(1.0) * sparkle * 0.3; // Add glitter
-            
-            // Blend original shadow/lighting with our snow
-            gl_FragColor.rgb = gl_FragColor.rgb * finalSnow; 
+            // 1. Soft Snow for flat areas
+            float crackNoise = sin(uv.x * 0.05) * cos(uv.y * 0.05) * sin((uv.x+uv.y)*0.02); 
+            float crack = 1.0 - smoothstep(0.0, 1.0, abs(crackNoise) + 0.1);
+            vec3 snowColor = vec3(1.0, 1.0, 1.0); // Pure white
+            vec3 iceColor = vec3(0.8, 0.9, 1.0); // Icy blue for contrast
+            vec3 softSnow = mix(snowColor, iceColor, crack * 0.2);
+
+            // 2. Hard, Icy look for steep areas
+            float light = dot(worldNormal, directionalLights[0].direction);
+            light = floor(light * 4.0) / 4.0;
+            vec3 hardIce = mix(vec3(0.7, 0.8, 1.0), vec3(0.9, 0.95, 1.0), smoothstep(0.0, 0.8, light));
+
+            // Blend original shadow/lighting with our materials
+            vec3 finalMaterial = mix(softSnow, hardIce, smoothstep(0.2, 0.6, slope));
+            gl_FragColor.rgb = gl_FragColor.rgb * finalMaterial; 
         }
         `
     );
@@ -585,13 +767,129 @@ rightEye.position.set(-0.2, 0.5, penguinRadius); // Wider and higher
 visualsGroup.add(rightEye);
 
 
-// ======== SNOW PARTICLES ========
-const particleCount = 50;
-const particleGeometry = new THREE.BufferGeometry();
-const particlePositions = new Float32Array(particleCount * 3);
-const particleVelocities = Array.from({ length: particleCount }, () => new THREE.Vector3());
-const particleLifespans = new Float32Array(particleCount);
-let nextParticle = 0;
+// ======== TERRAIN SNOW (GPU INTERACTION) ========
+function createSquareTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32; canvas.height = 32;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = 'white';
+    context.fillRect(0, 0, 32, 32);
+    return new THREE.CanvasTexture(canvas);
+}
+
+const sparkleGeo = topMesh.geometry;
+const sparklePosAttr = sparkleGeo.attributes.position;
+const sparkleIndex = sparkleGeo.index!;
+
+const fPos: number[] = [];
+const fColor: number[] = [];
+
+const vA = new THREE.Vector3();
+const vB = new THREE.Vector3();
+const vC = new THREE.Vector3();
+const faceNormal = new THREE.Vector3();
+
+// Iterate Triangles (World Space Barycentric)
+for (let i = 0; i < sparkleIndex.count; i += 3) {
+    const a = sparkleIndex.getX(i);
+    const b = sparkleIndex.getX(i+1);
+    const c = sparkleIndex.getX(i+2);
+
+    vA.fromBufferAttribute(sparklePosAttr, a);
+    vB.fromBufferAttribute(sparklePosAttr, b);
+    vC.fromBufferAttribute(sparklePosAttr, c);
+
+    const wA = new THREE.Vector3(vA.x, vA.z, -vA.y);
+    const wB = new THREE.Vector3(vB.x, vB.z, -vB.y);
+    const wC = new THREE.Vector3(vC.x, vC.z, -vC.y);
+
+    const edge1 = new THREE.Vector3().subVectors(wB, wA);
+    const edge2 = new THREE.Vector3().subVectors(wC, wA);
+    faceNormal.crossVectors(edge1, edge2).normalize();
+
+    // Relaxed slope filtering: Snow sticks to almost everything (78 degrees)
+    const slopeFactor = Math.abs(faceNormal.y); 
+    if (slopeFactor < 0.2) continue;
+
+    if (wA.y < waterLevel + 0.1) continue;
+
+    const area = 0.5 * edge1.length() * edge2.length() * Math.sin(edge1.angleTo(edge2));
+    const count = Math.max(1, Math.floor(area * 16.0 * slopeFactor));
+
+    for (let j = 0; j < count; j++) {
+        const r1 = Math.sqrt(Math.random());
+        const r2 = Math.random();
+        const u = 1 - r1;
+        const v = r1 * (1 - r2);
+        const w = r1 * r2;
+
+        const p = new THREE.Vector3().addScaledVector(wA, u).addScaledVector(wB, v).addScaledVector(wC, w);
+        p.y += 0.05; 
+        fPos.push(p.x, p.y, p.z);
+        
+        const baseColor = new THREE.Color(0.85, 0.9, 0.95);
+        if (Math.random() < 0.05) {
+            fColor.push(3.0, 3.0, 3.0);
+        } else {
+            const brightness = 0.9 + Math.random() * 0.2;
+            fColor.push(baseColor.r * brightness, baseColor.g * brightness, baseColor.b * brightness);
+        }
+    }
+}
+
+const sparkleGeometry = new THREE.BufferGeometry();
+sparkleGeometry.setAttribute('position', new THREE.Float32BufferAttribute(fPos, 3));
+sparkleGeometry.setAttribute('color', new THREE.Float32BufferAttribute(fColor, 3));
+
+const sparkleMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        pointTexture: { value: createSquareTexture() },
+        uPenguinPositions: { value: [] },
+        uPenguinCount: { value: 0 }
+    },
+    vertexShader: `
+        attribute vec3 color;
+        varying vec3 vColor;
+        uniform vec3 uPenguinPositions[31];
+        uniform int uPenguinCount;
+        
+        void main() {
+            vColor = color;
+            vec3 pos = position;
+            
+            float radius = 0.6; // Matches penguin radius
+            // NOTE: Interaction logic removed for "simple spray" request, 
+            // but we keep the structure if we want to add "displacement" back.
+            // User asked: "change interaction so it doesn't move the snow on the ground."
+            // "instead, add a small snowy particle 'spray' around the penguins"
+            // So I will DISABLE displacement here.
+            
+            vec4 mvPosition = modelViewMatrix * vec4( pos, 1.0 );
+            gl_Position = projectionMatrix * mvPosition;
+            
+            gl_PointSize = 0.3 * ( 300.0 / -mvPosition.z ); 
+        }
+    `,
+    fragmentShader: `
+        uniform sampler2D pointTexture;
+        varying vec3 vColor;
+        void main() {
+            vec4 tex = texture2D( pointTexture, gl_PointCoord );
+            if (tex.a < 0.1) discard;
+            gl_FragColor = vec4(vColor, tex.a);
+        }
+    `,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending
+});
+
+const sparkleSystem = new THREE.Points(sparkleGeometry, sparkleMaterial);
+sparkleSystem.frustumCulled = false;
+scene.add(sparkleSystem);
+
+
+
 
 function createCircleTexture() {
     const canvas = document.createElement('canvas');
@@ -605,31 +903,7 @@ function createCircleTexture() {
     return new THREE.CanvasTexture(canvas);
 }
 
-for (let i = 0; i < particleCount; i++) {
-    particlePositions[i * 3] = 0;
-    particlePositions[i * 3 + 1] = -100; // Start off-screen
-    particlePositions[i * 3 + 2] = 0;
-    particleLifespans[i] = 0;
-}
-
-particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-
-const particleMaterial = new THREE.PointsMaterial({
-    map: createCircleTexture(),
-    color: 0xffffff, // White snow particles
-    size: 0.5,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    transparent: true,
-    opacity: 0.7
-});
-
-const snowParticles = new THREE.Points(particleGeometry, particleMaterial);
-snowParticles.frustumCulled = false;
-scene.add(snowParticles);
-
-
-// ======== SPLASH PARTICLES ========
+// ======== MARINE SNOW ========
 const splashParticleCount = 100;
 const splashParticleGeometry = new THREE.BufferGeometry();
 const splashParticlePositions = new Float32Array(splashParticleCount * 3);
@@ -652,7 +926,7 @@ splashParticleGeometry.setAttribute('opacity', new THREE.BufferAttribute(splashP
 const splashParticleMaterial = new THREE.ShaderMaterial({
     uniforms: {
         pointTexture: { value: createCircleTexture() },
-        color: { value: new THREE.Color(0x00aaff) }
+        color: { value: new THREE.Color(0xaaccff) } // Brighter, whiter blue
     },
     vertexShader: `
         attribute float opacity;
@@ -736,15 +1010,25 @@ function updateMarineSnow() {
 
     for(let i=0; i<marineSnowCount; i++) {
         const x = pos[i*3];
-        const y = pos[i*3+1];
         const z = pos[i*3+2];
+
+        // Aggressive Culling: If the terrain here is above water, hide the particle and skip.
+        const terrainY = getHeight(x, -z);
+        if (terrainY > waterLevel) {
+            pos[i*3+1] = -1000; // Effectively hides the particle far below the scene
+            continue;
+        }
+        
+        const y = pos[i*3+1];
         const depth = marineSnowDepths[i];
         
         // Wave bobbing
         let surfaceY = waterLevel;
         surfaceY += Math.sin(x * 0.05 + time * 0.5) * 0.8;
         surfaceY += Math.cos(z * 0.07 + time * 0.4) * 0.6;
-        pos[i*3+1] = surfaceY - depth;
+        
+        // Final check to ensure particles stay below the waves
+        pos[i*3+1] = Math.min(surfaceY - depth, waterLevel - 0.5);
         
         // Bioluminescence
         const dx = x - pPos.x;
@@ -759,7 +1043,6 @@ function updateMarineSnow() {
              col[i*3+2] = 1.0;
         } else {
              // Dim back to blue-ish randomly
-             // Optimization: Don't update if already dark? 
              // Just set to a base cool color to be safe/simple
              col[i*3] = 0.0;
              col[i*3+1] = 0.2;
@@ -767,6 +1050,7 @@ function updateMarineSnow() {
         }
     }
     marineSnowSystem.geometry.attributes.position.needsUpdate = true;
+    marineSnowSystem.geometry.attributes.color.needsUpdate = true; // Added this line
 } 
 
 function updateIcebergs() {
@@ -782,23 +1066,13 @@ function updateIcebergs() {
         const waveY = getWaveHeight(ice.body.position.x, ice.body.position.z, time);
         const depth = waveY - ice.body.position.y;
         
-        if (depth > 0) {
-            ice.body.force.y += 30000 * depth - ice.body.velocity.y * 500;
+        if (depth > -1.0) { // Start applying force even if slightly above water
+            ice.body.force.y += 180000 * (depth + 0.5) - ice.body.velocity.y * 500;
         }
 
-        // Stability (Keel effect)
-        const up = new CANNON.Vec3(0, 1, 0);
-        const localUp = new CANNON.Vec3(0, 1, 0);
-        ice.body.quaternion.vmult(localUp, localUp);
-        
-        // Torque to restore up
-        const axis = localUp.cross(up);
-        const angle = Math.asin(axis.length());
-        if (angle > 0.01) {
-            axis.normalize();
-            const torque = axis.scale(angle * 5000); // Strength
-            ice.body.torque.vadd(torque, ice.body.torque);
-        }
+        // Heavily damp angular velocity on X and Z axes to prevent flipping
+        ice.body.angularVelocity.x *= 0.1;
+        ice.body.angularVelocity.z *= 0.1;
         
         // Containment
         if (Math.abs(ice.body.position.x) > halfSize) {
@@ -1023,6 +1297,9 @@ class NpcPenguin {
     slideTimer = 0;
     slideDelay = Math.random() * 0.5;
     isBaby = false;
+    state: 'IDLE' | 'WANDERING' = 'IDLE';
+    stateTimer = Math.random() * 5;
+    wanderTarget: CANNON.Vec3 | null = null;
 
     constructor(position: THREE.Vector3, scale: number = 1) {
         this.isBaby = scale < 0.8;
@@ -1105,7 +1382,7 @@ function spawnNpcs() {
         if (y > waterLevel + 0.5) {
             const isBaby = Math.random() > 0.5;
             const scale = isBaby ? 0.5 : 1.0;
-            const npc = new NpcPenguin(new THREE.Vector3(x, y + 1, z), scale);
+            const npc = new NpcPenguin(new THREE.Vector3(x, y + 5, z), scale); // SPAWN HIGH
             npc.body.quaternion.set(0, 0, 0, 1); // Force upright
             npc.body.angularVelocity.set(0, 0, 0); // No spin
             npc.body.angularDamping = 0.99; // Keep upright
@@ -1134,7 +1411,10 @@ function spawnSquids() {
 }
 
 function resetPlayer() {
-    penguinBody.position.set(-25, 20, 0);
+    const spawnX = -25;
+    const spawnZ = 0;
+    const spawnY = getHeight(spawnX, -spawnZ) + 5; // Spawn 5 units above terrain
+    penguinBody.position.set(spawnX, spawnY, spawnZ);
     penguinBody.velocity.set(0, 0, 0);
     penguinBody.angularVelocity.set(0, 0, 0);
     penguinBody.quaternion.set(0, 0, 0, 1);
@@ -1175,6 +1455,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === '1') setLevel(1);
     if (e.key === '2') setLevel(2);
     if (e.key === '3') setLevel(3);
+    if (e.key === '9') soundManager.play('debug'); // Audio Debug
 });
 
 // ======== CATCH PLANE ========
@@ -1201,16 +1482,17 @@ document.addEventListener('keydown', (event) => {
     }
     
     if (key === ' ' && !event.repeat) {
-        if ((canJump && penguinBody.velocity.y < 5) || playerIsInWater) {
-            // Anticipatory tilt (Stronger)
-            const tilt = new CANNON.Quaternion();
-            tilt.setFromEuler(-0.8, 0, 0); // Tilt back more
-            penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
-            
-            penguinBody.velocity.y = isSprinting ? 35 : 18; // Higher jumps
+        if (canJump || playerIsInWater) {
+            // Water jump needs to be very powerful to escape drag and reach icebergs
+            const jumpForce = playerIsInWater ? 45 : (isSprinting ? 35 : 28);
+            penguinBody.velocity.y = jumpForce;
             canJump = false;
+            jumpTimer = 0.2; // Prevent immediate re-grounding
         }
     }
+
+    if (key === '(') cameraYOffset -= 1.0;
+    if (key === ')') cameraYOffset += 1.0;
 });
 
 document.addEventListener('keyup', (event) => {
@@ -1229,53 +1511,80 @@ document.addEventListener('keyup', (event) => {
     }
 });
 
-// -- Touch Controls (Tap to Move) --
-let touchSlideId = -1;
+// -- Touch Controls (New)
+
+// -- Touch Controls (New) --
+
+// -- Touch Controls --
+let touchTarget: THREE.Vector3 | null = null;
+let lastTouchTime = 0;
 
 document.addEventListener('touchstart', (e) => {
-    for (let i = 0; i < e.changedTouches.length; i++) {
-        const t = e.changedTouches[i];
-        
-        // Right side: Actions
-        if (t.clientX > window.innerWidth / 2) {
-             if (touchSlideId === -1) {
-                 touchSlideId = t.identifier;
-                 // Jump on touch start
-                if ((canJump && penguinBody.velocity.y < 5) || playerIsInWater) {
-                    const tilt = new CANNON.Quaternion();
-                    tilt.setFromEuler(-0.8, 0, 0); 
-                    penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
-                    penguinBody.velocity.y = isSprinting ? 35 : 18;
-                    canJump = false;
-                }
-                isSliding = true; // Hold to slide
-             }
-        } else {
-            // Left side: Tap to move
-            // Raycast to find target
-            const raycaster = new THREE.Raycaster();
-            const mouse = new THREE.Vector2();
-            mouse.x = (t.clientX / window.innerWidth) * 2 - 1;
-            mouse.y = -(t.clientY / window.innerHeight) * 2 + 1;
-            raycaster.setFromCamera(mouse, camera);
-            
-            const intersects = raycaster.intersectObject(topMesh);
-            if (intersects.length > 0) {
-                isSprinting = true; // Always sprint on touch? Or just walk. Let's sprint.
-            }
+    // 1 Finger: Move
+    if (e.touches.length === 1) {
+        // Double tap sprint
+        const now = Date.now();
+        if (now - lastTouchTime < 300) {
+            isSprinting = true;
         }
+        lastTouchTime = now;
+        
+        if (canJump || playerIsInWater) {
+            const tilt = new CANNON.Quaternion();
+            tilt.setFromEuler(-0.8, 0, 0); 
+            penguinBody.quaternion.mult(tilt, penguinBody.quaternion);
+            
+            const jumpForce = playerIsInWater ? 45 : (isSprinting ? 35 : 28);
+            penguinBody.velocity.y = jumpForce;
+            
+            canJump = false;
+            jumpTimer = 0.2;
+        }
+
+        updateTouchTarget(e.touches[0]);
+    } else if (e.touches.length === 2) {
+        // 2 Fingers: Camera (OrbitControls handles this natively usually)
+        // Stop moving
+        touchTarget = null;
+        isSprinting = false;
+    }
+}, { passive: false });
+
+document.addEventListener('touchmove', (e) => {
+    if (e.touches.length === 1) {
+        e.preventDefault(); // Stop scroll
+        updateTouchTarget(e.touches[0]);
     }
 }, { passive: false });
 
 document.addEventListener('touchend', (e) => {
-    for (let i = 0; i < e.changedTouches.length; i++) {
-        const t = e.changedTouches[i];
-        if (t.identifier === touchSlideId) {
-            touchSlideId = -1;
-            isSliding = false;
-        }
+    if (e.touches.length === 0) {
+        touchTarget = null;
+        isSprinting = false;
     }
 });
+
+function updateTouchTarget(touch: Touch) {
+    const mouse = new THREE.Vector2();
+    mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+    
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+    
+    // Raycast against infinite plane at penguin height? Or terrain?
+    // Terrain is better.
+    const intersects = raycaster.intersectObject(topMesh);
+    if (intersects.length > 0) {
+        touchTarget = intersects[0].point;
+    } else {
+        // Fallback: Plane at height 0
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -waterLevel);
+        const target = new THREE.Vector3();
+        raycaster.ray.intersectPlane(plane, target);
+        if (target) touchTarget = target;
+    }
+}
 
 const moveVelocity = 5;
 const sprintMoveVelocity = 22;
@@ -1283,14 +1592,18 @@ let isSliding = false;
 let isSprinting = false;
 let canJump = false;
 let playerIsInWater = false;
+let jumpTimer = 0; // Cooldown for ground check after jumping
 
 function checkGround() {
+    if (jumpTimer > 0) {
+        canJump = false;
+        return;
+    }
     const start = penguinBody.position;
-    // Cast down slightly more than radius
-    const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 0.8), start.z);
+    // Cast down very slightly more than radius for strict ground detection
+    const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 0.1), start.z);
     
     const result = new CANNON.RaycastResult();
-    // Default collision filter is fine, we want to hit anything (terrain or icebergs)
     world.raycastClosest(start, end, {}, result);
     
     if (result.hasHit) {
@@ -1309,13 +1622,16 @@ function updatePenguinMovement() {
         penguinBody.velocity.set(0, 0, 0);
     }
 
+    // 1. Update State first
+    const wasInWater = playerIsInWater;
+    playerIsInWater = penguinBody.position.y < waterLevel + penguinRadius;
     checkGround();
 
     // Water splash check
-    const wasInWater = playerIsInWater;
-    playerIsInWater = penguinBody.position.y < waterLevel + penguinRadius;
     if (playerIsInWater && !wasInWater) {
-        createSplash(penguinBody.position);
+        const impact = Math.abs(penguinBody.velocity.y);
+        createSplash(penguinBody.position, impact);
+        soundManager.play('splash');
     }
     
     // Eating Squids/Fish
@@ -1325,6 +1641,7 @@ function updatePenguinMovement() {
             scene.remove(squid.visuals);
             squids.splice(i, 1);
             hunger = Math.min(100, hunger + 20);
+            soundManager.play('gulp');
         }
     }
 
@@ -1336,19 +1653,17 @@ function updatePenguinMovement() {
         
         // Diving Logic
         if (isSliding) {
-             // Dive down
              penguinBody.force.y -= 50; 
         } else {
-            // Buoyancy (only when not diving)
+            // Buoyancy
             const depth = waterLevel - penguinBody.position.y;
             if (depth > 0) {
-                 // Spring-like buoyancy (Reduced)
                  penguinBody.force.y += 140 * depth - penguinBody.velocity.y * 10;
             }
         }
     } else if (isSliding) {
         penguinBody.material = penguinSlidingMaterial;
-        penguinBody.linearDamping = 0.01; // Ultra low damping for ice slide
+        penguinBody.linearDamping = 0.01;
         
         // Apply downhill force
         const start = penguinBody.position;
@@ -1359,163 +1674,93 @@ function updatePenguinMovement() {
 
         if (result.hasHit) {
             const groundNormal = result.hitNormalWorld;
-            
             const gravity = new CANNON.Vec3(0, -25, 0);
             const normal = groundNormal;
             const dot = gravity.dot(normal);
             const perp = normal.scale(dot);
             const parallel = gravity.vsub(perp);
-            
-            penguinBody.force.x += parallel.x * 5; // Stronger gravity effect on slopes
+            penguinBody.force.x += parallel.x * 5; 
             penguinBody.force.z += parallel.z * 5;
         }
-
-        // Lock tumbling while sliding
+        
+        // Steering Forces (Only if grounded)
+        if (canJump) {
+            const rightDir = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+            const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
+            const steerForce = 10;
+            if (input.l) {
+                penguinBody.force.x -= rightDir.x * steerForce;
+                penguinBody.force.z -= rightDir.z * steerForce;
+            }
+            if (input.r) {
+                penguinBody.force.x += rightDir.x * steerForce;
+                penguinBody.force.z += rightDir.z * steerForce;
+            }
+            if (input.f) {
+                penguinBody.force.x -= camDir.x * steerForce;
+                penguinBody.force.z -= camDir.z * steerForce;
+            }
+        }
         penguinBody.angularVelocity.set(0, 0, 0);
-        
-        // Steering Forces while sliding
-        const rightDir = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
-        const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
-        
-        const steerForce = 10;
-        if (input.l) {
-            penguinBody.force.x -= rightDir.x * steerForce;
-            penguinBody.force.z -= rightDir.z * steerForce;
-        }
-        if (input.r) {
-            penguinBody.force.x += rightDir.x * steerForce;
-            penguinBody.force.z += rightDir.z * steerForce;
-        }
-        // Boost/Brake
-        if (input.f) {
-            penguinBody.force.x -= camDir.x * steerForce;
-            penguinBody.force.z -= camDir.z * steerForce;
-        }
-        // Don't return, let velocity update happen but maybe override it?
-        // Actually, if we don't return, the WASD logic below will OVERWRITE velocity.x/z based on speed.
-        // We want SLIDING physics (force based) not WALKING physics (velocity based).
         return; 
     } else {
         penguinBody.material = penguinMaterial;
-        penguinBody.linearDamping = 0.9; // High damping for walking
-        // Lock tumbling while walking to stay upright
+        // Low damping when in air, high damping when walking
+        penguinBody.linearDamping = canJump ? 0.9 : 0.05; 
         penguinBody.angularVelocity.set(0, 0, 0);
     }
 
-    // Standard WASD movement
-    const currentMoveVelocity = isSprinting ? sprintMoveVelocity : moveVelocity;
-    const rightDir = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
-    rightDir.y = 0;
-    const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
-    const vel = new CANNON.Vec3(0, 0, 0);
-
-    if (input.f) { vel.x -= camDir.x; vel.z -= camDir.z; }
-    if (input.b) { vel.x += camDir.x; vel.z += camDir.z; }
-    if (input.l) { vel.x -= rightDir.x; vel.z -= rightDir.z; }
-    if (input.r) { vel.x += rightDir.x; vel.z += rightDir.z; }
-
-    const currentYVelocity = penguinBody.velocity.y;
-    if (vel.length() > 0) {
-        vel.normalize();
-        penguinBody.velocity.x = vel.x * currentMoveVelocity;
-        penguinBody.velocity.z = vel.z * currentMoveVelocity;
-        const angle = Math.atan2(penguinBody.velocity.x, penguinBody.velocity.z);
-        
-        const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
-        
-        if (playerIsInWater) {
-             // Steep forward lean for swimming/diving
-             const lean = new CANNON.Quaternion();
-             const leanAngle = isSliding ? Math.PI / 1.8 : Math.PI / 2.5;
-             lean.setFromEuler(leanAngle, 0, 0); 
-             targetRot.mult(lean, targetRot);
-        }
-        
-        penguinBody.quaternion.slerp(targetRot, 0.4, penguinBody.quaternion);
-    } else {
-        penguinBody.velocity.x *= 0.8;
-        penguinBody.velocity.z *= 0.8;
-    }
-    penguinBody.velocity.y = currentYVelocity;
-
-    // --- BOUNDARY CHECK ---
-    const halfSize = terrainSize / 2 - 1.0; // Buffer
-    if (Math.abs(penguinBody.position.x) > halfSize) {
-        penguinBody.position.x = Math.sign(penguinBody.position.x) * halfSize;
-        penguinBody.velocity.x = 0;
-    }
-    if (Math.abs(penguinBody.position.z) > halfSize) {
-        penguinBody.position.z = Math.sign(penguinBody.position.z) * halfSize;
-        penguinBody.velocity.z = 0;
-    }
+    // Standard WASD / Touch movement (Only when grounded or in water)
+    if (canJump || playerIsInWater) {
+        const currentMoveVelocity = isSprinting ? sprintMoveVelocity : moveVelocity;
+        const rightDir = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+        rightDir.y = 0;
+        const camDir = new THREE.Vector3().crossVectors(rightDir, new THREE.Vector3(0,1,0));
+        const vel = new CANNON.Vec3(0, 0, 0);
     
-    // Weaker tumble damping while walking/running
-    penguinBody.angularVelocity.x *= 0.5;
-    penguinBody.angularVelocity.z *= 0.5;
-}
-
-function updateParticles() {
-    const positions = snowParticles.geometry.attributes.position.array as Float32Array;
-
-    // Update all living particles
-    for (let i = 0; i < particleCount; i++) {
-        if (particleLifespans[i] > 0) {
-            particleLifespans[i]--;
-            positions[i * 3] += particleVelocities[i].x;
-            positions[i * 3 + 1] += particleVelocities[i].y;
-            positions[i * 3 + 2] += particleVelocities[i].z;
+        if (touchTarget) {
+            const dir = new THREE.Vector3().subVectors(touchTarget, penguinBody.position);
+            dir.y = 0;
+            if (dir.length() > 0.5) { 
+                dir.normalize();
+                vel.x = dir.x;
+                vel.z = dir.z;
+            }
         } else {
-            positions[i * 3 + 1] = -100; // Hide dead particles
+            if (input.f) { vel.x -= camDir.x; vel.z -= camDir.z; }
+            if (input.b) { vel.x += camDir.x; vel.z += camDir.z; }
+            if (input.l) { vel.x -= rightDir.x; vel.z -= rightDir.z; }
+            if (input.r) { vel.x += rightDir.x; vel.z += rightDir.z; }
         }
+    
+        const currentYVelocity = penguinBody.velocity.y;
+        if (vel.length() > 0) {
+            vel.normalize();
+            penguinBody.velocity.x = vel.x * currentMoveVelocity;
+            penguinBody.velocity.z = vel.z * currentMoveVelocity;
+            const angle = Math.atan2(penguinBody.velocity.x, penguinBody.velocity.z);
+            
+            if (!playerIsInWater) {
+                soundManager.play('shuffle');
+            }
+    
+            const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
+            if (playerIsInWater) {
+                 const lean = new CANNON.Quaternion();
+                 const leanAngle = isSliding ? Math.PI / 1.8 : Math.PI / 2.5;
+                 lean.setFromEuler(leanAngle, 0, 0); 
+                 targetRot.mult(lean, targetRot);
+            }
+            penguinBody.quaternion.slerp(targetRot, 0.4, penguinBody.quaternion);
+        } else {
+            penguinBody.velocity.x *= 0.8;
+            penguinBody.velocity.z *= 0.8;
+        }
+        penguinBody.velocity.y = currentYVelocity;
     }
-
-    if (isSliding && !playerIsInWater) {
-        // Find ground normal for particle direction
-        const start = penguinBody.position;
-        const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 1.0), start.z);
-        const result = new CANNON.RaycastResult();
-        result.reset();
-        world.raycastClosest(start, end, {}, result);
-        
-        let tangent = new CANNON.Vec3(0, 0, 1);
-        if (result.hasHit) {
-             const normal = result.hitNormalWorld;
-             // Approximate a backward tangent
-             const back = new CANNON.Vec3();
-             penguinBody.quaternion.vmult(new CANNON.Vec3(0,0,1), back); // Forward
-             back.scale(-1, back); // Backward
-             
-             // Project backward vector onto the plane defined by the normal
-             // v_proj = v - (v dot n) * n
-             const dot = back.dot(normal);
-             const perp = normal.scale(dot);
-             tangent = back.vsub(perp);
-             tangent.normalize();
-        }
-
-        const speed = penguinBody.velocity.length();
-        const particlesToSpawn = Math.floor(speed / 8); // Significantly fewer particles
-
-        // Spawn new particles in a ring buffer
-        for (let i = 0; i < particlesToSpawn; i++) { 
-            const particleIndex = nextParticle;
-            const penguinGroundY = penguinBody.position.y - penguinRadius;
-            positions[particleIndex * 3] = penguinBody.position.x + (Math.random() - 0.5) * penguinRadius;
-            positions[particleIndex * 3 + 1] = penguinGroundY;
-            positions[particleIndex * 3 + 2] = penguinBody.position.z + (Math.random() - 0.5) * penguinRadius;
-
-            // Use calculated tangent for velocity
-            particleVelocities[particleIndex].set(
-                tangent.x * (0.1 + Math.random() * 0.1) + (Math.random() - 0.5) * 0.05, 
-                tangent.y * (0.1 + Math.random() * 0.1) + Math.random() * 0.1,
-                tangent.z * (0.1 + Math.random() * 0.1) + (Math.random() - 0.5) * 0.05
-            );
-            particleLifespans[particleIndex] = Math.random() * 30 + 30; // Longer lifespan
-            nextParticle = (nextParticle + 1) % particleCount;
-        }
-    }
-    snowParticles.geometry.attributes.position.needsUpdate = true;
 }
+
+
 
 // ======== BLOOD PARTICLES ========
 const bloodParticleCount = 50;
@@ -1548,12 +1793,20 @@ const bloodParticles = new THREE.Points(bloodParticleGeometry, bloodParticleMate
 bloodParticles.frustumCulled = false;
 scene.add(bloodParticles);
 
+let activeRipple = 0;
+
 function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood: boolean = false) {
     const time = clock.getElapsedTime();
     
-    // Update Shader Ripple
+    // Update Shader Ripple (Toggle between 1 and 2)
     if (topMaterial.userData.shader) {
-        topMaterial.userData.shader.uniforms.uRipple.value.set(position.x, position.z, time);
+        if (activeRipple === 0) {
+            topMaterial.userData.shader.uniforms.uRipple1.value.set(position.x, position.z, time);
+            activeRipple = 1;
+        } else {
+            topMaterial.userData.shader.uniforms.uRipple2.value.set(position.x, position.z, time);
+            activeRipple = 0;
+        }
     }
 
     const scale = Math.min(3, impactVelocity / 8); 
@@ -1590,7 +1843,7 @@ function createSplash(position: CANNON.Vec3, impactVelocity: number = 5, isBlood
 
         velocities[particleIndex].set(
             (Math.random() - 0.5) * 0.2 * scale,
-            (Math.random()) * 0.2 * scale + 0.1,
+            (Math.random()) * 0.05 * scale + 0.05, // Reduced vertical velocity (4x less)
             (Math.random() - 0.5) * 0.2 * scale
         );
         lifespans[particleIndex] = (Math.random() * 30 + 30) * scale;
@@ -1618,13 +1871,7 @@ function updateSplashParticles() {
             positions[i * 3 + 1] += splashParticleVelocities[i].y;
             positions[i * 3 + 2] += splashParticleVelocities[i].z;
             splashParticleVelocities[i].y -= 0.01; 
-            
-            // Fade out
-            if (splashParticleLifespans[i] < 20) {
-                 opacities[i] = splashParticleLifespans[i] / 20;
-            } else {
-                 opacities[i] = 1.0;
-            }
+            opacities[i] = 1.0; // Keep full opacity
         } else {
             positions[i * 3 + 1] = -100;
             opacities[i] = 0;
@@ -1649,8 +1896,9 @@ function updateSplashParticles() {
     bloodParticles.geometry.attributes.position.needsUpdate = true;
 }
 
+
+
 function updateNpcs() {
-    const followDistance = 8; 
     const followSpeed = 4.5;
     const separationDist = 1.5;
 
@@ -1720,125 +1968,282 @@ function updateNpcs() {
             }
         }
 
-        // Target Selection (Baby follows Adult, Adult follows Player)
-        let targetPos = penguinBody.position;
-        if (npc.isBaby) {
-             let minD = 1000;
-             let nearestAdult = null;
-             for (const other of npcPenguins) {
-                 if (!other.isBaby) {
-                     const d = npc.body.position.distanceTo(other.body.position);
-                     if (d < minD) {
-                         minD = d;
-                         nearestAdult = other;
+                // Target Selection (Baby follows Adult, Adult follows Player)
+                let targetPos = penguinBody.position;
+                if (npc.isBaby) {
+                     let minD = 1000;
+                     let nearestAdult = null;
+                     for (const other of npcPenguins) {
+                         if (!other.isBaby) {
+                             const d = npc.body.position.distanceTo(other.body.position);
+                             if (d < minD) {
+                                 minD = d;
+                                 nearestAdult = other;
+                             }
+                         }
                      }
-                 }
-             }
-             if (nearestAdult && minD < 30) {
-                 targetPos = nearestAdult.body.position;
-             }
-        }
-
-        const distanceToTarget = npc.body.position.distanceTo(targetPos);
-
-        if (distanceToTarget < followDistance) {
-            npc.isFollowing = true;
-        }
-
-        if (npc.isFollowing) {
-            const direction = targetPos.vsub(npc.body.position);
-            direction.normalize();
-            
-            // Movement Logic
-            if (distanceToTarget > 3.0) { // Stop if too close (Don't crowd)
-                if (npc.isSliding) {
-                     // Sliding physics (Downhill + Follow momentum)
-                     const start = npc.body.position;
-                     const end = new CANNON.Vec3(start.x, start.y - (penguinRadius + 1.0), start.z);
-                     const result = new CANNON.RaycastResult();
-                     result.reset();
-                     world.raycastClosest(start, end, {}, result);
-
-                     if (result.hasHit) {
-                        const groundNormal = result.hitNormalWorld;
-                        const gravity = new CANNON.Vec3(0, -25, 0);
-                        const normal = groundNormal;
-                        const dot = gravity.dot(normal);
-                        const perp = normal.scale(dot);
-                        const parallel = gravity.vsub(perp);
-                        
-                        npc.body.force.x += parallel.x * 5; 
-                        npc.body.force.z += parallel.z * 5;
+                     if (nearestAdult && minD < 30) {
+                         targetPos = nearestAdult.body.position;
                      }
-                     
-                     // Steering while sliding (weak)
-                     npc.body.force.x += direction.x * 5;
-                     npc.body.force.z += direction.z * 5;
-
-                } else {
-                     // Walking
-                     npc.body.velocity.x = direction.x * followSpeed;
-                     npc.body.velocity.z = direction.z * followSpeed;
                 }
-            } else {
-                // Stop moving if close, but dampen slide
-                if (!npc.isSliding) {
-                    npc.body.velocity.x *= 0.8;
-                    npc.body.velocity.z *= 0.8;
-                }
-            }
-            
-            // Visual Rotation
-            const angle = Math.atan2(npc.body.velocity.x, npc.body.velocity.z);
-            const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
-            
-            if (npc.isInWater) {
-                 const lean = new CANNON.Quaternion();
-                 lean.setFromEuler(Math.PI / 2.5, 0, 0); 
-                 targetRot.mult(lean, targetRot);
-            }
-            
-            npc.body.quaternion.slerp(targetRot, 0.15, npc.body.quaternion);
-        } else {
-            // Natural Wander
-            // 2% chance to change wander state
-            if (Math.random() > 0.98) {
-                // Pick a random direction
-                const angle = Math.random() * Math.PI * 2;
-                const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
-                npc.body.quaternion.slerp(targetRot, 0.5, npc.body.quaternion);
-                
-                // Move forward
-                const forward = new CANNON.Vec3(0, 0, 1);
-                npc.body.quaternion.vmult(forward, forward);
-                npc.body.velocity.x = forward.x * 2.0; // Slow walk
-                npc.body.velocity.z = forward.z * 2.0;
-            } else {
-                // Keep moving a bit (damped)
-                npc.body.velocity.x *= 0.95;
-                npc.body.velocity.z *= 0.95;
-            }
-            
-            // Visual Rotation for Wander
-            if (npc.body.velocity.length() > 0.1) {
-                 const angle = Math.atan2(npc.body.velocity.x, npc.body.velocity.z);
-                 const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
-                 
-                 if (npc.isInWater) {
-                     const lean = new CANNON.Quaternion();
-                     lean.setFromEuler(Math.PI / 2.5, 0, 0); 
-                     targetRot.mult(lean, targetRot);
-                 }
-                 npc.body.quaternion.slerp(targetRot, 0.1, npc.body.quaternion);
-            }
-        }
         
-        npc.update();
-    });
+                        const distanceToTarget = npc.body.position.distanceTo(targetPos);
+                        const isFollowing = distanceToTarget < 5.0; // Follow if player is within this radius        
+                if (isFollowing) {
+                    const direction = targetPos.vsub(npc.body.position);
+                    
+                    // Movement Logic
+                    if (distanceToTarget > 2.0) { // Stop if too close to avoid crowding
+                        direction.normalize();
+                        npc.body.velocity.x = direction.x * followSpeed;
+                        npc.body.velocity.z = direction.z * followSpeed;
+                    } else {
+                        npc.body.velocity.x *= 0.9;
+                        npc.body.velocity.z *= 0.9;
+                    }
+                    
+                    // Visual Rotation
+                    const angle = Math.atan2(npc.body.velocity.x, npc.body.velocity.z);
+                    const targetRot = new CANNON.Quaternion().setFromAxisAngle(new CANNON.Vec3(0, 1, 0), angle);
+                    
+                    if (npc.isInWater) {
+                         const lean = new CANNON.Quaternion();
+                         lean.setFromEuler(Math.PI / 2.5, 0, 0); 
+                         targetRot.mult(lean, targetRot);
+                    }
+                    
+                    npc.body.quaternion.slerp(targetRot, 0.15, npc.body.quaternion);
+                } else {
+                    // If not following, just slow down
+                    npc.body.velocity.x *= 0.9;
+                    npc.body.velocity.z *= 0.9;
+                }
+                
+                npc.update();    });
 }
 
 function updateSquids() {
     squids.forEach(squid => squid.update(squids));
+}
+
+// ======== DOLPHIN ========
+class Dolphin {
+    body: CANNON.Body;
+    visuals: THREE.Group;
+    jumpCooldown = 0;
+
+    constructor(position: THREE.Vector3) {
+        const shape = new CANNON.Box(new CANNON.Vec3(1.5, 0.4, 0.5));
+        this.body = new CANNON.Body({
+            mass: 150,
+            position: new CANNON.Vec3(position.x, position.y, position.z),
+            linearDamping: 0.8,
+            angularDamping: 0.95 // Add angular damping to reduce spinning
+        });
+        this.body.addShape(shape);
+        world.addBody(this.body);
+
+        // Visuals
+        this.visuals = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x88aaff, roughness: 0.1, metalness: 0.2 });
+        
+        // Main Body
+        const bodyGeom = new THREE.CapsuleGeometry(0.5, 2.5, 8, 16);
+        bodyGeom.rotateZ(Math.PI / 2);
+        const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
+        this.visuals.add(bodyMesh);
+
+        // Dorsal Fin (3D)
+        const finShape = new THREE.Shape();
+        finShape.moveTo(0, 0);
+        finShape.quadraticCurveTo(0.5, 0.5, 1, 0);
+        const finGeom = new THREE.ExtrudeGeometry(finShape, { depth: 0.1, bevelEnabled: false });
+        const finMesh = new THREE.Mesh(finGeom, bodyMat);
+        finMesh.position.set(0.5, 0.4, -0.05); // Centered on back
+        finMesh.rotation.x = Math.PI/2;
+        this.visuals.add(finMesh);
+
+        // Eyes
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+        const eyeGeom = new THREE.SphereGeometry(0.08);
+        const leftEye = new THREE.Mesh(eyeGeom, eyeMat);
+        leftEye.position.set(-1.4, 0.2, 0.3);
+        this.visuals.add(leftEye);
+        const rightEye = new THREE.Mesh(eyeGeom, eyeMat);
+        rightEye.position.set(-1.4, 0.2, -0.3);
+        this.visuals.add(rightEye);
+        
+        scene.add(this.visuals);
+    }
+
+    update(target: CANNON.Vec3) {
+        // Buoyancy
+        const time = clock.getElapsedTime();
+        const waveY = getWaveHeight(this.body.position.x, this.body.position.z, time);
+        const depth = waveY - this.body.position.y;
+        if (depth > -1.0) {
+            this.body.force.y += 3000 * (depth + 0.5) - this.body.velocity.y * 100;
+        }
+
+        // Follow Logic (gentler)
+        if (target.y < waterLevel + 2.0) {
+            const dir = target.vsub(this.body.position);
+            dir.normalize();
+            // Apply a much smaller force, and only if not moving too fast already
+            if (this.body.velocity.length() < 5) {
+                this.body.velocity.x += dir.x * 0.1;
+                this.body.velocity.z += dir.z * 0.1;
+            }
+        }
+        
+        // Iceberg avoidance
+        for (const iceberg of icebergs) {
+            const dist = this.body.position.distanceTo(iceberg.body.position);
+            if (dist < 10) { // Detection radius
+                const pushDir = this.body.position.vsub(iceberg.body.position);
+                pushDir.y = 0; // Push horizontally
+                pushDir.normalize();
+                this.body.velocity.vadd(pushDir.scale(0.5), this.body.velocity);
+            }
+        }
+
+        // Jumping
+        if (this.jumpCooldown <= 0 && Math.random() < 0.01 && this.body.position.y > waterLevel -1) {
+            this.body.velocity.y = 30;
+            this.jumpCooldown = 5; // 5 seconds cooldown
+        }
+        this.jumpCooldown -= 1/60;
+
+        // Visuals
+        this.visuals.position.copy(this.body.position as any);
+        if (this.body.velocity.length() > 0.1) {
+            const angle = Math.atan2(-this.body.velocity.z, this.body.velocity.x);
+            this.visuals.rotation.y = angle;
+        }
+    }
+}
+
+const dolphins: Dolphin[] = [];
+dolphins.push(new Dolphin(new THREE.Vector3(20, 0, 0)));
+dolphins.push(new Dolphin(new THREE.Vector3(25, 0, 10)));
+
+// ======== PHYSICS UTILS ========
+function threeMeshToCannonTrimesh(mesh: THREE.Mesh): CANNON.Trimesh {
+    const geometry = mesh.geometry;
+    const vertices = (geometry.attributes.position.array as Float32Array);
+    const indices = (geometry.index!.array as Uint16Array | Uint32Array);
+    return new CANNON.Trimesh(Array.from(vertices), Array.from(indices));
+}
+
+// ======== LOG CABIN ========
+const cabinGroup = new THREE.Group();
+const cabinX = -20;
+const cabinZ = 10;
+// Note: getHeight parameters depend on terrain generation logic.
+// Based on terrain loop: vertices[j+2] = getHeight(worldX, -worldZ) where worldZ comes from -PlaneY.
+// It seems getHeight expects (x, z). Let's try direct coordinates.
+const cabinY = getHeight(cabinX, -cabinZ); 
+
+// Base
+const cabinBase = new THREE.Mesh(
+    new THREE.BoxGeometry(4, 3, 4),
+    new THREE.MeshStandardMaterial({ color: 0x8b4513, roughness: 0.9 }) // SaddleBrown
+);
+cabinBase.position.y = 1.5;
+cabinBase.castShadow = true;
+cabinBase.receiveShadow = true;
+cabinGroup.add(cabinBase);
+
+// Roof
+const cabinRoof = new THREE.Mesh(
+    new THREE.ConeGeometry(3.5, 2, 4),
+    new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 }) // Darker Brown
+);
+cabinRoof.position.y = 3 + 1; 
+cabinRoof.rotation.y = Math.PI / 4; // Align with box
+cabinRoof.castShadow = true;
+cabinRoof.receiveShadow = true;
+cabinGroup.add(cabinRoof);
+
+// Chimney
+const chimney = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 2, 0.6),
+    new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.8 }) // Stone Grey
+);
+chimney.position.set(1.2, 3.5, 1.2);
+chimney.castShadow = true;
+cabinGroup.add(chimney);
+
+// Door
+const door = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 2),
+    new THREE.MeshStandardMaterial({ color: 0x221100, side: THREE.DoubleSide })
+);
+door.position.set(0, 1, 2.01);
+cabinGroup.add(door);
+
+cabinGroup.position.set(cabinX, cabinY, cabinZ);
+scene.add(cabinGroup);
+
+// Smoke System
+const smokeCount = 50;
+const smokeGeo = new THREE.BufferGeometry();
+const smokePos = new Float32Array(smokeCount * 3);
+const smokeLife = new Float32Array(smokeCount);
+const smokeVel: THREE.Vector3[] = [];
+
+for(let i=0; i<smokeCount; i++) {
+    smokePos[i*3] = 0; smokePos[i*3+1] = -100; smokePos[i*3+2] = 0;
+    smokeLife[i] = 0;
+    smokeVel.push(new THREE.Vector3());
+}
+smokeGeo.setAttribute('position', new THREE.BufferAttribute(smokePos, 3));
+
+const smokeMat = new THREE.PointsMaterial({
+    color: 0xcccccc,
+    size: 2.0,
+    transparent: true,
+    opacity: 0.4,
+    map: createCircleTexture(),
+    depthWrite: false,
+    blending: THREE.NormalBlending
+});
+const smokeSystem = new THREE.Points(smokeGeo, smokeMat);
+scene.add(smokeSystem);
+
+function updateSmoke() {
+    const chimneyWorldPos = new THREE.Vector3();
+    chimney.getWorldPosition(chimneyWorldPos);
+    chimneyWorldPos.y += 1.0; // Top of chimney
+
+    const positions = smokeSystem.geometry.attributes.position.array as Float32Array;
+
+    for(let i=0; i<smokeCount; i++) {
+        if (smokeLife[i] <= 0) {
+            // Respawn
+            smokeLife[i] = 60 + Math.random() * 60;
+            positions[i*3] = chimneyWorldPos.x + (Math.random()-0.5)*0.2;
+            positions[i*3+1] = chimneyWorldPos.y;
+            positions[i*3+2] = chimneyWorldPos.z + (Math.random()-0.5)*0.2;
+            
+            smokeVel[i].set(
+                (Math.random()-0.5)*0.03 + 0.04, // Wind to +X
+                0.04 + Math.random()*0.02,       // Up
+                (Math.random()-0.5)*0.03
+            );
+        } else {
+            smokeLife[i]--;
+            positions[i*3] += smokeVel[i].x;
+            positions[i*3+1] += smokeVel[i].y;
+            positions[i*3+2] += smokeVel[i].z;
+            
+            // Wind acceleration
+            smokeVel[i].x += 0.0005; 
+        }
+        
+        if (smokeLife[i] <= 0) positions[i*3+1] = -100;
+    }
+    smokeSystem.geometry.attributes.position.needsUpdate = true;
 }
 
 // ======== ANIMATION LOOP ========
@@ -1848,8 +2253,10 @@ const slidingQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(-8
 
 function animate() {
     requestAnimationFrame(animate);
+
     const deltaTime = clock.getDelta();
     const elapsedTime = clock.getElapsedTime();
+    if (jumpTimer > 0) jumpTimer -= deltaTime;
     
     // Update Caustics (Projected)
     if (topMaterial.userData.shader) {
@@ -1864,15 +2271,23 @@ function animate() {
     // Water Waves (Gerstner Field)
     const positions = waterMesh.geometry.attributes.position.array as Float32Array;
     const basePositions = waterMesh.userData.basePositions as Float32Array;
-    const topY = waterDepth / 2; // 10
+    const topY = waterDepth / 2;
     
     for (let i = 0; i < positions.length; i += 3) {
-        // Only animate vertices on the top surface
-        if (basePositions[i + 1] > topY - 0.1) { 
+        if (basePositions[i + 1] > topY - 0.1) {
             const bx = basePositions[i];
             const bz = basePositions[i + 2];
             
-            const gPos = getGerstnerPosition(bx, bz, elapsedTime);
+            const terrainH = getHeight(bx, -bz);
+            let gPos = getGerstnerPosition(bx, bz, elapsedTime);
+            
+            // If terrain is above water, suppress horizontal displacement
+            if (terrainH > waterLevel) {
+                const suppression = Math.max(0.0, 1.0 - (terrainH - waterLevel) / 2.0); // Fade out chop over 2 units of height
+                gPos.x = bx + (gPos.x - bx) * suppression;
+                gPos.z = bz + (gPos.z - bz) * suppression;
+            }
+            
             positions[i] = gPos.x;
             positions[i + 1] = topY + (gPos.y - waterLevel);
             positions[i + 2] = gPos.z;
@@ -1885,14 +2300,16 @@ function animate() {
     (marineSnowSystem.material as THREE.PointsMaterial).opacity = 0.4 + Math.sin(elapsedTime * 2) * 0.2;
     
     updatePenguinMovement();
-    updateParticles();
     updateSplashParticles();
+    updateSmoke(); // Add smoke update
     updateMarineSnow();
+    
+
     updateIcebergs();
     updateShoreSplashes();
     updateNpcs();
     updateSquids();
-    updateIcebergs();
+    dolphins.forEach(d => d.update(penguinBody.position));
     
     // Update animated objects (door)
     penguinGroup.position.x = penguinBody.position.x;
@@ -1917,7 +2334,15 @@ function animate() {
 
     controls.target.copy(penguinGroup.position);
     controls.update();
+    
+    // Apply camera offset for debugging
+    camera.position.y += cameraYOffset;
+    cameraDebugDiv.innerHTML = `Camera Y: ${camera.position.y.toFixed(2)} (Offset: ${cameraYOffset.toFixed(2)})`;
+    
     renderer.render(scene, camera);
+    
+    // Reset camera position after rendering to not interfere with controls
+    camera.position.y -= cameraYOffset;
 }
 
 // ======== RESIZE HANDLER ========
@@ -1926,5 +2351,3 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
-
-animate();
